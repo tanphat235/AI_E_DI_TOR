@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# AIVE project data. Media and derived artefacts never belong in git: raw footage
+# is large and binary, and everything under .aive/ or output/ is reproducible from
+# the inputs plus an Edit Plan.
+project/
+!project/.gitkeep
+**/.aive/
+**/output/
+**/raw/*
+**/music/*
+**/capcut/*
+!**/raw/.gitkeep
+!**/music/.gitkeep
+!**/capcut/.gitkeep
+
+# ...but `app/` is source, not a project. `**/capcut/*` above matches *any* directory
+# called capcut, which silently swallowed app/exporters/capcut/ - the CapCut exporter was
+# untracked by git and, because hatchling honours .gitignore, absent from the built wheel
+# while every test still passed against the working tree. Caught in Phase 10 by checking
+# what the wheel actually contained; `tests/unit/test_packaging.py` now checks it too.
+!app/**
+# The negation above re-includes everything under app/, so the build artefacts have to be
+# excluded again -- a later pattern wins, and the earlier __pycache__ rule no longer does.
+app/**/__pycache__/
+app/**/*.py[cod]
+
+# Media, wherever it lands
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.aac
+
+# Local config overrides
+.env
+*.local.toml
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/settings.json

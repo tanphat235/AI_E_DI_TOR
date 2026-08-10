@@ -1,0 +1,165 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aive"
+version = "1.0.0"
+description = "AIVE - local AI auto video editor: a deterministic toolbox driven by an AI director agent"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "AIVE" }]
+keywords = ["video-editing", "ffmpeg", "whisper", "capcut", "ai-agent"]
+classifiers = [
+    # Beta rather than Production/Stable, deliberately. Everything is implemented and
+    # tested, but the CapCut draft format is reverse-engineered and unverified against a
+    # real CapCut install - see docs/AGENT_TOOLS.md. Claiming stable would overstate that.
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Video :: Non-Linear Editor",
+    "Typing :: Typed",
+]
+
+# Phase 1 core. Deliberately tiny: the model layer, config, logging and CLI must
+# import without any media/ML dependency so that `aive doctor` and `aive schema`
+# work on a bare install.
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "typer>=0.15",
+    "rich>=13.9",
+    "imageio-ffmpeg>=0.5",
+]
+
+[project.optional-dependencies]
+# Each extra is unlocked by the phase that needs it. Keeping them separate means a
+# user who only wants CapCut export never installs PySide6 or CUDA-sized wheels.
+speech = ["faster-whisper>=1.1"]                                    # Phase 2
+# opencv is pinned below 5.0 deliberately. OpenCV 5 removed CascadeClassifier and
+# HOGDescriptor and ships no Haar cascades, leaving only FaceDetectorYN - which needs
+# downloaded ONNX weights. The classical-CV vision provider is specified to download
+# nothing, so it needs the 4.x line. Upgrading to 5 means adding a separate,
+# weights-based provider rather than editing the classical one.
+video = ["opencv-python>=4.10,<5", "scenedetect>=0.6.4", "numpy>=2.0"]  # Phase 3
+# Music analysis needs only numpy and PyAV. librosa was considered and rejected: it
+# would pull numba, scipy and scikit-learn (~200 MB) to supply a beat tracker and a
+# resampler that app/analysis/audio/features.py implements in ~50 lines, and loudness
+# comes from FFmpeg's EBU R128 meter rather than from Python at all.
+audio = ["numpy>=2.0", "av>=13.0"]                                   # Phase 7
+# Rendering needs no Python library at all. The renderer builds an argv list and runs the
+# FFmpeg binary; ffmpeg-python was declared here through Phase 6 and never imported, and
+# the SRT/ASS writers are hand-rolled (see app/subtitles/) rather than delegated to
+# pysubs2. Both were removed in Phase 10 rather than left as decorative requirements.
+render = []                                                          # Phase 7
+ui = ["PySide6>=6.8"]                                                # Phase 9
+# Everything, for a user who does not want to think about extras.
+all = [
+    "aive[speech]",
+    "aive[video]",
+    "aive[audio]",
+    "aive[ui]",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+aive = "app.cli.main:main"
+# A separate entry point as well as `aive ui`, so a desktop shortcut can launch the window
+# without going through the CLI's argument parsing.
+aive-ui = "app.ui.main:main"
+
+[project.urls]
+Repository = "https://github.com/tanphat235/AI_E_DI_TOR"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "B",        # flake8-bugbear
+    "C4",       # comprehensions
+    "SIM",      # simplify
+    "PTH",      # prefer pathlib
+    "RUF",      # ruff-specific
+    "ANN",      # type annotations
+    "T20",      # no print() - stdout is a machine contract, use app.cli.output
+    "TID",      # tidy imports
+]
+ignore = [
+    "ANN401",   # allow typing.Any where a schema is genuinely open
+]
+
+[tool.ruff.lint.isort]
+# `app` is pip-installed (editable), so ruff would otherwise group it with
+# third-party packages in the test modules.
+known-first-party = ["app"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use asserts, magic values and untyped fixtures freely.
+"tests/**" = ["ANN", "S101"]
+# The output module is the one sanctioned place that writes to stdout.
+"app/cli/output.py" = ["T20"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+files = ["app"]
+
+[[tool.mypy.overrides]]
+# Third-party packages that ship no type information.
+module = [
+    "imageio_ffmpeg.*",
+    "faster_whisper.*",
+    "ctranslate2.*",
+    "scenedetect.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "integration: exercises real media files or external binaries",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "@(abc\\.)?abstractmethod",
+]

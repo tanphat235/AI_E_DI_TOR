@@ -1,0 +1,92 @@
+# Continuous integration.
+#
+# Two jobs, because they answer different questions and the second is the one that has
+# actually caught a bug. `checks` runs lint, types and the suite on a full install.
+# `bare-install` proves the core package still works with *no* extras — the property that
+# makes `aive doctor` and `aive schema` usable before a user has downloaded a 200 MB wheel,
+# and one that is easy to break by adding a top-level import.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # The Qt tests build real widgets; offscreen means no display is needed on a runner.
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  checks:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows first: it is the development platform, and the one where path handling,
+        # the CapCut draft folder and the FFmpeg filter-graph escaping actually differ.
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,video,audio,ui]"
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Type check
+        run: mypy
+
+      - name: Test
+        run: pytest -q --cov=app --cov-report=term-missing
+
+      - name: Verify the environment AIVE reports
+        run: aive doctor
+
+  bare-install:
+    # The core package must import and run without a single media dependency. A top-level
+    # `import cv2` anywhere in the CLI path would break this and nothing else.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install .
+      - name: Commands that must work with no extras
+        run: |
+          aive --version
+          aive --help
+          aive schema show edit-plan > /dev/null
+          aive config show > /dev/null
+
+  wheel:
+    # Builds the artefact and checks its manifest. This is the job that would have caught
+    # the .gitignore rule that silently excluded the CapCut exporter from the wheel while
+    # every other test stayed green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build pytest
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit/test_packaging.py -q -m "integration or not integration"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aive-wheel
+          path: dist/*.whl
+          if-no-files-found: ignore

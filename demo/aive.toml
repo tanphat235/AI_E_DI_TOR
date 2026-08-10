@@ -1,0 +1,22 @@
+# Cấu hình cho project DEMO. Đây KHÔNG phải cấu hình mẫu để copy sang project thật.
+#
+# Media trong demo/ là clip tổng hợp bằng ffmpeg (dải màu phẳng, khung gần trắng) và
+# narration đọc bằng SAPI. Chúng có tính chất đã biết trước nên rất tốt để kiểm chứng
+# công cụ — nhưng các ngưỡng chất lượng mặc định, vốn để bảo vệ project thật, loại sạch
+# chúng: `aive rules scenes` báo eligible=0 với lý do quality.too_soft / too_bright.
+#
+# Màu phẳng không có gì để đo độ nét, nên điểm blur ≈ 0. Đó là câu trả lời đúng cho một
+# clip test, và là câu trả lời đúng cho một cú máy mất nét thật. Vì vậy phần dưới nới
+# ngưỡng để demo chạy hết pipeline, chứ không sửa cách đo.
+#
+# Với footage thật: xoá file này đi và dùng mặc định.
+
+[rules]
+min_blur_score = 0.0          # mặc định 0.35 - màu phẳng không có cạnh để đo
+brightness_max = 1.0          # mặc định 0.92 - khung test gần trắng
+min_stability_score = 0.0     # mặc định 0.40
+min_overall_quality = 0.20    # mặc định 0.45
+min_clip_duration = 0.5       # mặc định 1.2 - clip test chỉ dài 2-6 giây
+
+[speech]
+model = "tiny"                # đủ cho narration demo, và là model duy nhất đã cache sẵn

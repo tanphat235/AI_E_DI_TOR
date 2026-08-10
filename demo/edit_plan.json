@@ -1,0 +1,139 @@
+{
+  "schema_version": "1.0",
+  "project_id": "demo",
+  "created_by": "heuristic",
+  "created_at": "2026-08-10T06:58:39.262926Z",
+  "output": {
+    "aspect_ratio": "16:9",
+    "width": 1920,
+    "height": 1080,
+    "fps": 30.0
+  },
+  "narration": {
+    "source": {
+      "path": "narration.wav"
+    },
+    "kept_ranges": [
+      {
+        "start": 0.0,
+        "end": 0.7442179999999999
+      },
+      {
+        "start": 1.862676,
+        "end": 3.01873
+      },
+      {
+        "start": 5.691746,
+        "end": 6.947619
+      },
+      {
+        "start": 7.926485,
+        "end": 8.551973
+      },
+      {
+        "start": 8.878684999999999,
+        "end": 10.780952
+      }
+    ],
+    "gain_db": 0.0
+  },
+  "clips": [
+    {
+      "id": "c000",
+      "source": {
+        "path": "raw/004.mp4"
+      },
+      "source_range": {
+        "start": 0.48573699999999986,
+        "end": 2.514263
+      },
+      "timeline_start": 0.0,
+      "speed": 1.0,
+      "transition_in": null,
+      "transition_out": null,
+      "framing": null,
+      "mute_source_audio": true,
+      "reason": "Heuristic pick: highest-ranked candidate by duration, quality and variety. No semantic matching - revise this.",
+      "confidence": 0.567,
+      "scene_key": "004#0",
+      "beat_index": 0
+    },
+    {
+      "id": "c001",
+      "source": {
+        "path": "raw/001.mp4"
+      },
+      "source_range": {
+        "start": 4.159433,
+        "end": 5.840567
+      },
+      "timeline_start": 1.6285260000000004,
+      "speed": 1.0,
+      "transition_in": {
+        "kind": "dissolve",
+        "duration": 0.4
+      },
+      "transition_out": null,
+      "framing": null,
+      "mute_source_audio": true,
+      "reason": "Heuristic pick: highest-ranked candidate by duration, quality and variety. No semantic matching - revise this.",
+      "confidence": 0.565,
+      "scene_key": "001#2",
+      "beat_index": 2
+    },
+    {
+      "id": "c002",
+      "source": {
+        "path": "raw/002.mp4"
+      },
+      "source_range": {
+        "start": 0.6128799999999999,
+        "end": 3.3871200000000004
+      },
+      "timeline_start": 2.9096600000000006,
+      "speed": 1.0,
+      "transition_in": {
+        "kind": "dissolve",
+        "duration": 0.4
+      },
+      "transition_out": null,
+      "framing": null,
+      "mute_source_audio": true,
+      "reason": "Heuristic pick: highest-ranked candidate by duration, quality and variety. No semantic matching - revise this.",
+      "confidence": 0.452,
+      "scene_key": "002#0",
+      "beat_index": 3
+    }
+  ],
+  "subtitles": [
+    {
+      "range": {
+        "start": 0.0,
+        "end": 1.901542
+      },
+      "text": "First, prepare the soil.",
+      "style_id": "default",
+      "words": []
+    },
+    {
+      "range": {
+        "start": 2.0285260000000003,
+        "end": 3.269660000000001
+      },
+      "text": "Then water it well.",
+      "style_id": "default",
+      "words": []
+    },
+    {
+      "range": {
+        "start": 3.309660000000001,
+        "end": 5.662948000000002
+      },
+      "text": "Finally, add some mulch around the base.",
+      "style_id": "default",
+      "words": []
+    }
+  ],
+  "music": [],
+  "notes": "Heuristic baseline, not an edit. Clips were chosen by duration, quality and shot variety - nothing here reflects what the footage actually shows. Rewrite the selections and the reason fields before rendering."
+}

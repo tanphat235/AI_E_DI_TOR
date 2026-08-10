@@ -1,0 +1,255 @@
+# AIVE default configuration.
+#
+# This file is the single source of truth for every tunable value in the pipeline.
+# Nothing in `app/` may hardcode a threshold, duration or style constant.
+#
+# Override precedence, lowest to highest:
+#   1. Field defaults in app/config/settings.py
+#   2. This file (config/default.toml)
+#   3. <project>/aive.toml
+#   4. Environment variables, AIVE_<SECTION>__<FIELD> (double underscore nests)
+#   5. Explicit CLI flags
+#
+# Example env override:  AIVE_RULES__MIN_CLIP_DURATION=2.0
+
+[app]
+log_level = "INFO"
+# When true, a JSON-lines copy of every log record is written to
+# <project>/output/logs/<run_id>.jsonl for post-mortem inspection.
+log_json_file = true
+
+[media]
+# Leave empty to auto-resolve: system PATH first, then the vendored
+# imageio-ffmpeg binary. Set an absolute path to pin a specific build.
+ffmpeg_path = ""
+ffprobe_path = ""
+
+# ---------------------------------------------------------------------------
+# Phase 2 - speech recognition
+# ---------------------------------------------------------------------------
+[speech]
+model = "medium"          # faster-whisper size: tiny|base|small|medium|large-v3
+device = "auto"           # auto|cpu|cuda
+compute_type = "auto"     # auto|int8|int8_float16|float16|float32
+language = ""             # empty = autodetect
+word_timestamps = true    # required for karaoke-style ASS subtitles
+beam_size = 5
+vad_filter = true         # Silero VAD pre-pass suppresses hallucination in silence
+download_root = ""        # empty = HuggingFace default; large-v3 is roughly 3 GB
+cpu_threads = 0           # 0 = let ctranslate2 decide
+
+# Hallucination defences. Whisper invents plausible text over music and room
+# tone; these two thresholds are what catch it.
+condition_on_previous_text = false  # main cause of runaway repetition loops
+max_no_speech_prob = 0.75           # drop segments the model doubts are speech
+max_compression_ratio = 2.4         # above this the model is looping
+
+# ---------------------------------------------------------------------------
+# Phase 3-6 - video and vision analysis
+# ---------------------------------------------------------------------------
+[vision]
+# Which VisionProvider implementation to construct. "classical_cv" uses only
+# OpenCV primitives and downloads no model weights.
+provider = "classical_cv"
+scene_detector = "content"      # PySceneDetect algorithm: content|adaptive|threshold
+scene_threshold = 27.0          # ContentDetector delta-HSV threshold
+min_scene_duration = 0.8        # merge shorter detections into their neighbour
+keyframes_per_scene = 3
+# Analysis frames are downscaled before CV work: 10x faster and the quality
+# metrics we compute are scale-invariant enough not to care.
+downscale_width = 640
+samples_per_scene = 3           # probe points per scene; each reads a frame pair
+
+# Metric normalisation. Blur is a Laplacian variance, which is unbounded and
+# depends on content as much as focus - a flat wall is "soft" while perfectly in
+# focus. Scores are therefore comparative WITHIN a project; this is the divisor.
+blur_reference_variance = 250.0
+motion_low_threshold = 0.5      # px/frame at analysis scale: above this, not static
+motion_medium_threshold = 2.0
+motion_high_threshold = 6.0
+camera_move_consistency = 0.6   # below this the movement is incoherent = handheld
+shake_reference = 3.0           # jitter treated as maximally shaky
+zoom_radial_threshold = 0.5     # how radial movement must be to be a zoom
+
+# Classical vision provider. Uses only cascades bundled with OpenCV - no downloads.
+face_cascade = "haarcascade_frontalface_default.xml"
+face_min_size_ratio = 0.04      # smallest accepted face, as a fraction of frame height
+close_up_face_ratio = 0.35      # face/frame height above this reads as a close-up
+medium_face_ratio = 0.15        # above this, medium; below, wide
+
+# Keyframes written to .aive/keyframes/
+keyframe_width = 512
+keyframe_quality = 85
+
+# ---------------------------------------------------------------------------
+# Phase 5 - candidate ranking for the AI director
+#
+# These weights decide the ORDER scenes are offered to the director, never which
+# one it picks. Note that keyword_weight scores near zero on most projects: the
+# classical CV provider names no objects, so there is nothing to match against.
+# That is the main reason to add a CLIP or multimodal vision provider.
+# ---------------------------------------------------------------------------
+[planner]
+candidates_per_beat = 5         # a shortlist; 40 beats x 200 scenes is unreadable
+
+keyword_weight = 0.35           # beat keywords vs scene tags (~0 without a real provider)
+quality_weight = 0.25           # the scene's overall quality
+duration_weight = 0.25          # how well the scene's length suits the beat
+variety_weight = 0.15           # differing from the previous beat's shot type
+
+reuse_penalty = 0.5             # demote a shot already offered elsewhere
+duration_tolerance = 2.0        # seconds of slack before a length mismatch costs
+
+# ---------------------------------------------------------------------------
+# Phase 4 - Rule Engine
+#
+# These are the deterministic guardrails. The AI director proposes; these
+# thresholds decide what is actually admissible.
+# ---------------------------------------------------------------------------
+[rules]
+# Silence and filler removal
+silence_threshold_db = -35.0
+min_silence_duration = 0.35
+silence_keep_padding = 0.08     # breathing room retained on each side of a cut
+# Hesitation sounds. Never meaningful, so always removed.
+filler_words = ["um", "uh", "uhm", "ah", "er", "erm", "eh", "hmm", "mmm"]
+# Discourse markers that are also ordinary words. Cutting "like" out of
+# "I like gardening" ruins the sentence, so these need an explicit opt-in.
+ambiguous_filler_words = [
+    "like", "you know", "i mean", "actually", "basically", "literally",
+    "sort of", "kind of",
+]
+remove_ambiguous_fillers = false
+max_repetition_gap = 1.5        # identical phrases closer than this = a retake
+min_repetition_words = 2        # at 1, "very very good" would lose a word
+max_repetition_words = 12       # bounds the retake search
+min_kept_duration = 0.20        # drop surviving slivers that contain no word
+
+# Clip length bounds
+min_clip_duration = 1.2         # below this the cut reads as a glitch
+max_clip_duration = 8.0         # above this a single shot starts to drag
+
+# Quality floors. A scene failing any of these is only selected when no
+# alternative covers the narration beat.
+min_blur_score = 0.35
+brightness_min = 0.15
+brightness_max = 0.92
+min_stability_score = 0.40
+min_overall_quality = 0.45
+
+# Duplicate detection: perceptual-hash similarity above which two scenes are
+# considered the same shot and only the higher-quality one survives.
+duplicate_similarity = 0.90
+
+# Transitions
+default_transition = "dissolve"
+transition_duration = 0.40
+# A transition may never consume more than this fraction of the shorter of the
+# two clips it joins, otherwise the shot has no time to read.
+max_transition_ratio = 0.25
+
+# ---------------------------------------------------------------------------
+# Phase 2 - subtitle styling
+# ---------------------------------------------------------------------------
+[subtitle]
+formats = ["srt", "ass"]
+max_chars_per_line = 42
+max_lines = 2
+min_cue_duration = 0.70
+max_cue_duration = 6.00
+cue_gap = 0.04                  # minimum blank between consecutive cues
+font_name = "Arial"
+font_size = 48                  # in a fixed 1920x1080 space, so it scales with output
+# ASS colours are &HAABBGGRR - alpha, then BLUE, GREEN, RED. NOT RGB.
+primary_colour = "&H00FFFFFF"   # spoken / normal text
+secondary_colour = "&H00A0A0A0" # not-yet-spoken text, karaoke only
+outline_colour = "&H00000000"
+outline = 2.0
+shadow = 0.0
+margin_v = 60
+margin_h = 60
+alignment = 2                   # ASS numpad layout: 2 = bottom centre
+karaoke = false                 # per-word highlight sweep; needs word timings
+
+# ---------------------------------------------------------------------------
+# Phase 7 - music
+# ---------------------------------------------------------------------------
+[music]
+target_lufs = -18.0             # music bed loudness before ducking
+narration_target_lufs = -16.0
+duck_gain_db = -12.0            # how far music drops under narration
+duck_threshold_db = -30.0       # narration level that triggers ducking
+duck_attack = 0.15
+duck_release = 0.60
+fade_in = 1.50
+fade_out = 2.00
+
+# -- analysis ---------------------------------------------------------------
+analysis_sample_rate = 22050    # plenty for tempo and energy; halves decode cost
+bpm_min = 60.0                  # search window for tempo estimation
+bpm_max = 190.0
+bpm_min_confidence = 0.15       # below this, report no BPM rather than a guess
+bpm_min_crest = 4.0             # onset peak-to-mean; sustained material is 2-3, drums 20-30
+intro_level_ratio = 0.55        # RMS below this fraction of the track median is "intro"
+intro_max_fraction = 0.35       # never call more than this much of a track an intro
+energy_floor_db = -40.0         # RMS mapped to energy 0.0
+energy_ceiling_db = -10.0       # RMS mapped to energy 1.0
+energy_rms_weight = 0.7         # remainder is spectral brightness
+brightness_reference_hz = 3500.0  # spectral centroid mapped to brightness 1.0
+
+# -- mood thresholds --------------------------------------------------------
+# Read as a decision table, in this order: the first match wins. Documented in
+# app/analysis/audio/mood.py, which is the only consumer.
+mood_calm_energy = 0.35
+mood_energetic_energy = 0.68
+mood_fast_bpm = 120.0
+mood_slow_bpm = 90.0
+mood_bright_brightness = 0.55
+
+# ---------------------------------------------------------------------------
+# Phase 7 - render output
+# ---------------------------------------------------------------------------
+[output]
+aspect_ratio = "16:9"
+width = 1920
+height = 1080
+fps = 30.0
+video_codec = "libx264"
+video_crf = 18                  # visually lossless-ish for delivery
+video_preset = "medium"
+pixel_format = "yuv420p"        # widest player compatibility
+audio_codec = "aac"
+audio_bitrate = "192k"
+audio_sample_rate = 48000
+
+# ---------------------------------------------------------------------------
+# Phase 7 - the renderer itself
+# ---------------------------------------------------------------------------
+[render]
+# Draft overrides. A draft exists to answer "does this edit work?", which needs
+# neither delivery resolution nor a slow encoder.
+draft_scale = 0.5               # multiplier on the plan's output size
+draft_crf = 30
+draft_preset = "veryfast"
+draft_fps = 0.0                 # 0 = keep the plan's frame rate
+
+threads = 0                     # 0 lets ffmpeg choose, right on all but shared machines
+overwrite = true                # -y; the destination is ours, under output/
+timeout = 0.0                   # 0 = no limit. A 4K master legitimately takes hours.
+progress_interval = 0.5         # seconds between progress callbacks
+
+# Transitions that need no motion are mapped straight onto ffmpeg's xfade
+# transitions; the rest are listed in app/renderer/ffmpeg/graph.py.
+default_transition = "dissolve"
+keep_source_audio_gain_db = -6.0  # applied when a clip sets mute_source_audio=false
+
+# ---------------------------------------------------------------------------
+# Phase 8 - CapCut export
+# ---------------------------------------------------------------------------
+[capcut]
+# Empty = auto-detect the platform draft directory. On Windows this is
+# %LOCALAPPDATA%\CapCut\User Data\Projects\com.lveditor.draft
+draft_dir = ""
+# Copy media into the draft folder rather than referencing it in place. Safer,
+# because CapCut breaks if the original files move, but doubles disk use.
+copy_media = true
