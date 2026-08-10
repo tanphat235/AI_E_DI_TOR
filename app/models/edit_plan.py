@@ -72,9 +72,9 @@ class OutputSpec(AiveModel):
     """
 
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
-    width: int = Field(default=1920, gt=0)
-    height: int = Field(default=1080, gt=0)
-    fps: float = Field(default=30.0, gt=0.0, le=240.0)
+    width: int = Field(default=3840, gt=0)
+    height: int = Field(default=2160, gt=0)
+    fps: float = Field(default=60.0, gt=0.0, le=240.0)
 
     @property
     def frame_duration(self) -> float:

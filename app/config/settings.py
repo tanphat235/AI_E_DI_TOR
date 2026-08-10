@@ -553,9 +553,9 @@ class OutputSettings(AiveModel):
     """
 
     aspect_ratio: AspectRatio = AspectRatio.LANDSCAPE
-    width: int = Field(default=1920, gt=0)
-    height: int = Field(default=1080, gt=0)
-    fps: float = Field(default=30.0, gt=0.0, le=240.0)
+    width: int = Field(default=3840, gt=0)
+    height: int = Field(default=2160, gt=0)
+    fps: float = Field(default=60.0, gt=0.0, le=240.0)
 
     video_codec: str = Field(default="libx264", min_length=1)
     video_crf: int = Field(default=18, ge=0, le=51)

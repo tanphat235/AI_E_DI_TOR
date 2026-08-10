@@ -20,6 +20,11 @@ coverage.xml
 # the inputs plus an Edit Plan.
 project/
 !project/.gitkeep
+# `projects/<name>/` is the same thing, plural, for anyone keeping more than one
+# project checked out under the repo root. The whole tree is ignored outright -
+# aive.toml, edit_plan.json and any generator script included - because none of
+# it is application source.
+projects/
 **/.aive/
 **/output/
 **/raw/*

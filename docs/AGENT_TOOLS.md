@@ -242,7 +242,7 @@ satisfy, and says whether the project can be covered at all. Writes `.aive/brief
 
 ```
 # brief=.../brief.json project=demo feasible=true narration=5.7s beats=4 need_footage=3 footage=13.0s ratio=2.3x scenes=5
-# constraints clip=0.8-8.0s transition=dissolve@0.40s max_transition_ratio=0.25 output=1920x1080@30fps aspect=16:9 quality_floor=0.30
+# constraints clip=0.8-8.0s transition=dissolve@0.40s max_transition_ratio=0.25 output=3840x2160@60fps aspect=16:9 quality_floor=0.30
 B000 tl=0.00-1.90 want=1.9 kw=first,prepare,soil cands=5 | First, um, prepare the soil.
     004#0 raw/004.mp4 0.00-3.00 d=3.0 score=0.57 q=0.97 shot=unknown mot=high | no semantic tags to match against; 3.0s covers the 1.9s beat; good quality (0.97)
 B001 tl=CUT want=0.0 kw=water cands=0 | Then water it?

@@ -400,12 +400,22 @@ class FilterGraphBuilder:
                 fold.label = padded
                 fold.duration += gap
 
+        # concat and xfade both refuse inputs whose timebases differ, and a chain of many
+        # concats can drift its output timebase away from the per-clip 1/fps one (observed:
+        # FFmpeg rebasing an accumulated stream to 1/1000000 several joins in). Rebasing both
+        # operands immediately before every join is cheap and makes the join correct
+        # regardless of how its inputs got here.
+        main = fold.next_label("vtb")
+        fold.filters.append(f"[{fold.label}]settb=1/{fps:g}[{main}]")
+        rebased_incoming = fold.next_label("vtb")
+        fold.filters.append(f"[{incoming}]settb=1/{fps:g}[{rebased_incoming}]")
+
         transition = clip.transition_in
         duration = transition.duration if transition is not None else 0.0
         joined = fold.next_label("vj")
 
         if transition is None or duration <= 0.0:
-            fold.filters.append(f"[{fold.label}][{incoming}]concat=n=2:v=1:a=0[{joined}]")
+            fold.filters.append(f"[{main}][{rebased_incoming}]concat=n=2:v=1:a=0[{joined}]")
             fold.duration += clip.timeline_duration
         else:
             name = XFADE_TRANSITIONS.get(transition.kind)
@@ -418,7 +428,7 @@ class FilterGraphBuilder:
                 )
             offset = max(0.0, fold.duration - duration)
             fold.filters.append(
-                f"[{fold.label}][{incoming}]"
+                f"[{main}][{rebased_incoming}]"
                 f"xfade=transition={name}:duration={duration:.6f}:offset={offset:.6f}"
                 f"[{joined}]"
             )

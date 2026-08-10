@@ -211,9 +211,9 @@ mood_bright_brightness = 0.55
 # ---------------------------------------------------------------------------
 [output]
 aspect_ratio = "16:9"
-width = 1920
-height = 1080
-fps = 30.0
+width = 3840
+height = 2160
+fps = 60.0
 video_codec = "libx264"
 video_crf = 18                  # visually lossless-ish for delivery
 video_preset = "medium"

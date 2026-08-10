@@ -148,14 +148,18 @@ class TestInputs:
 class TestVideoNormalisation:
     def test_every_clip_is_normalised_to_the_same_geometry(self) -> None:
         """xfade and concat both refuse mismatched inputs, and name neither clip nor field."""
-        text = _graph_text(_plan(_clip("c1"), _clip("c2", source=CLIP_B, timeline_start=4.0)))
+        output = OutputSpec(width=1920, height=1080, fps=30.0)
+        text = _graph_text(
+            _plan(_clip("c1"), _clip("c2", source=CLIP_B, timeline_start=4.0), output=output)
+        )
         assert text.count("scale=1920:1080:force_original_aspect_ratio=decrease") == 2
         assert text.count("setsar=1") == 2
         assert text.count("fps=30") == 2
 
     def test_footage_is_letterboxed_rather_than_stretched(self) -> None:
         """Distorting faces to fill a frame is never the right default."""
-        text = _graph_text(_plan())
+        output = OutputSpec(width=1920, height=1080, fps=30.0)
+        text = _graph_text(_plan(output=output))
         assert "force_original_aspect_ratio=decrease" in text
         assert "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black" in text
 
@@ -274,7 +278,8 @@ class TestVideoJoining:
 
 class TestDraftMode:
     def test_draft_halves_the_geometry(self) -> None:
-        graph = _build(_plan(), draft=True)
+        output = OutputSpec(width=1920, height=1080, fps=30.0)
+        graph = _build(_plan(output=output), draft=True)
         assert (graph.width, graph.height) == (960, 540)
 
     def test_draft_dimensions_are_even(self) -> None:

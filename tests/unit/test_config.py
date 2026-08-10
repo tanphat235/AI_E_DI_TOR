@@ -214,7 +214,7 @@ class TestOutputSettings:
         """Encoder settings must stay out of the plan so one plan renders many ways."""
         spec = load_settings().output.to_output_spec()
         assert spec.aspect_ratio is AspectRatio.LANDSCAPE
-        assert spec.fps == 30.0
+        assert spec.fps == 60.0
         assert not hasattr(spec, "video_crf")
 
     def test_a_vertical_project_config(self, tmp_path: Path) -> None:

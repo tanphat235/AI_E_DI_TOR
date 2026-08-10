@@ -36,6 +36,7 @@ from app.models.edit_plan import (
     EditPlan,
     MusicCue,
     NarrationTrack,
+    OutputSpec,
     SubtitleCue,
     TimelineClip,
     Transition,
@@ -163,7 +164,8 @@ class TestDraftStructure:
             assert bucket in document["materials"]
 
     def test_the_canvas_matches_the_plans_output_spec(self, project: Path) -> None:
-        document = _export(_plan(), project)
+        output = OutputSpec(width=1920, height=1080, fps=30.0)
+        document = _export(_plan(output=output), project)
         assert document["canvas_config"]["width"] == 1920
         assert document["canvas_config"]["height"] == 1080
         assert document["fps"] == 30.0
