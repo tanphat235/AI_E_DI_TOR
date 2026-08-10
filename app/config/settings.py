@@ -488,6 +488,65 @@ class MusicSettings(AiveModel):
         return self
 
 
+class TtsSettings(AiveModel):
+    """Speech synthesis — turning a written script into a narration track.
+
+    ``backend`` defaults to the offline one. AIVE's promise is that it makes no network call,
+    so the backend that breaks that has to be asked for by name rather than fallen into.
+    """
+
+    backend: str = Field(
+        default="sapi",
+        min_length=1,
+        description=(
+            "'sapi' uses Windows' own voices: offline, no dependency, but only the voices "
+            "installed in Windows. 'edge' uses Microsoft Edge's free service - no account "
+            "and no API key, and the only good Vietnamese voices - but it CALLS THE NETWORK."
+        ),
+    )
+    voice: OptionalStr = Field(
+        default=None,
+        description="Voice name. Empty picks a default for the language.",
+    )
+    language: str = Field(
+        default="vi",
+        min_length=2,
+        description="Language of the script. Chooses the default voice and is recorded on "
+        "the transcript.",
+    )
+    rate: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=3.0,
+        description="Speaking rate multiplier. 1.0 is the voice's natural pace.",
+    )
+    gap: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=5.0,
+        description=(
+            "Silence after each line, in seconds. A script read with no pause between "
+            "sentences sounds hurried, and the pause is also where a cut can land."
+        ),
+    )
+    max_words_per_line: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Split a long paragraph at sentence boundaries above this many words. 0 keeps "
+            "one paragraph as exactly one beat. Really a statement about how long you are "
+            "willing to hold a single shot."
+        ),
+    )
+    keep_parts: bool = Field(
+        default=True,
+        description=(
+            "Keep the per-line audio under .aive/. Costs a little disk and means a "
+            "mispronounced word is fixed by re-speaking one line, not the whole script."
+        ),
+    )
+
+
 class RenderSettings(AiveModel):
     """Phase 7 — how the FFmpeg renderer behaves.
 
@@ -621,6 +680,7 @@ class AiveSettings(BaseSettings):
     rules: RuleSettings = RuleSettings()
     subtitle: SubtitleSettings = SubtitleSettings()
     music: MusicSettings = MusicSettings()
+    tts: TtsSettings = TtsSettings()
     output: OutputSettings = OutputSettings()
     render: RenderSettings = RenderSettings()
     capcut: CapCutSettings = CapCutSettings()
@@ -757,6 +817,7 @@ __all__ = [
     "RuleSettings",
     "SpeechSettings",
     "SubtitleSettings",
+    "TtsSettings",
     "VisionSettings",
     "WhisperDevice",
     "config_search_paths",

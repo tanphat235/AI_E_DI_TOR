@@ -349,6 +349,26 @@ class TestCommand:
         command = self._command(_plan(), project)
         assert command[-1].endswith("final.mp4")
 
+    def test_the_destination_is_absolute(self, project: Path) -> None:
+        """FFmpeg runs with its working directory set to the log folder, so the subtitle
+        filter can take a bare filename. A relative `-o` is then resolved against *that*
+        folder: `aive render -o ./out/x.mp4` failed with "No such file or directory" while
+        an absolute path worked."""
+        renderer = _renderer()
+        settings = AiveSettings()
+        from app.renderer.ffmpeg.graph import FilterGraphBuilder
+
+        plan = _plan()
+        graph = FilterGraphBuilder(settings).build(plan, project_root=project, subtitle_file=None)
+        request = RenderRequest(
+            plan=plan,
+            project_root=project,
+            # Deliberately relative, which is what a user typing -o produces.
+            destination=Path("output") / "relative.mp4",
+        )
+        command = renderer._command("ffmpeg", graph, request)
+        assert Path(command[-1]).is_absolute()
+
 
 class TestSubtitleSidecars:
     def test_requested_formats_are_written_beside_the_video(self, project: Path) -> None:
@@ -391,3 +411,30 @@ class TestSubtitleSidecars:
         plan = _plan(subtitles=(SubtitleCue(range=TimeRange(start=0.0, end=2.0), text="hello"),))
         request = _request(plan, project)
         assert _renderer()._subtitle_to_burn(request, ()) is None
+
+    def test_the_burned_ass_sits_in_the_directory_ffmpeg_will_run_in(
+        self, project: Path
+    ) -> None:
+        """The graph names the ASS file with no path, so cwd has to be its folder.
+
+        This shipped broken: FFmpeg was run in ``output/logs`` (from ``log_file.parent``)
+        while the ASS was written to ``output``, so every burn-in died with
+        ``ass_read_file: fopen failed``. The module docstring already promised the *output*
+        folder, so the code was wrong rather than the intent - and nothing caught it because
+        the two halves were only ever tested apart.
+        """
+        plan = _plan(subtitles=(SubtitleCue(range=TimeRange(start=0.0, end=2.0), text="hello"),))
+        request = _request(
+            plan, project, subtitle_formats=(SubtitleFormat.SRT,), burn_in_subtitles=True
+        )
+        (project / "output").mkdir(exist_ok=True)
+
+        renderer = _renderer()
+        burned = renderer._subtitle_to_burn(request, renderer._write_subtitles(request))
+        assert burned is not None
+
+        # The value passed as cwd, and the bare name the graph would carry.
+        work_dir = request.destination.parent
+        assert burned.parent == work_dir
+        assert (work_dir / burned.name).is_file()
+        assert renderer._log_path(request).parent != work_dir

@@ -19,6 +19,7 @@ from app.cli import (
     analyze_cmd,
     config_cmd,
     export_cmd,
+    narrate_cmd,
     plan_cmd,
     project_cmd,
     rules_cmd,
@@ -26,7 +27,7 @@ from app.cli import (
     subtitle_cmd,
 )
 from app.cli.doctor_cmd import doctor
-from app.cli.output import ExitCode, emit_error
+from app.cli.output import ExitCode, emit_error, force_utf8
 from app.cli.render_cmd import render
 from app.config.settings import ConfigError
 from app.utils.logging import configure_logging, get_logger
@@ -52,6 +53,7 @@ app.add_typer(subtitle_cmd.app, name="subtitle")
 app.add_typer(schema_cmd.app, name="schema")
 app.add_typer(config_cmd.app, name="config")
 app.add_typer(export_cmd.app, name="export")
+app.command("narrate")(narrate_cmd.narrate_command)
 app.command("render")(render)
 app.command("doctor")(doctor)
 
@@ -110,8 +112,12 @@ def main_callback(
         ),
     ] = False,
 ) -> None:
-    """Configure logging before any subcommand runs."""
+    """Configure logging and stream encoding before any subcommand runs."""
     import os
+
+    # Before anything can print. A cp1252 console cannot encode Vietnamese, and stdout is a
+    # JSON contract, so the encoding is pinned rather than inherited.
+    force_utf8()
 
     from app.config.settings import LogLevel
 

@@ -2,12 +2,12 @@
   "schema_version": "1.0",
   "project_id": "demo",
   "created_by": "heuristic",
-  "created_at": "2026-08-10T06:58:39.262926Z",
+  "created_at": "2026-08-10T09:09:31.568776Z",
   "output": {
     "aspect_ratio": "16:9",
-    "width": 1920,
-    "height": 1080,
-    "fps": 30.0
+    "width": 3840,
+    "height": 2160,
+    "fps": 60.0
   },
   "narration": {
     "source": {
@@ -16,23 +16,7 @@
     "kept_ranges": [
       {
         "start": 0.0,
-        "end": 0.7442179999999999
-      },
-      {
-        "start": 1.862676,
-        "end": 3.01873
-      },
-      {
-        "start": 5.691746,
-        "end": 6.947619
-      },
-      {
-        "start": 7.926485,
-        "end": 8.551973
-      },
-      {
-        "start": 8.878684999999999,
-        "end": 10.780952
+        "end": 13.146
       }
     ],
     "gain_db": 0.0
@@ -44,8 +28,8 @@
         "path": "raw/004.mp4"
       },
       "source_range": {
-        "start": 0.48573699999999986,
-        "end": 2.514263
+        "start": 0.0,
+        "end": 3.0
       },
       "timeline_start": 0.0,
       "speed": 1.0,
@@ -54,20 +38,20 @@
       "framing": null,
       "mute_source_audio": true,
       "reason": "Heuristic pick: highest-ranked candidate by duration, quality and variety. No semantic matching - revise this.",
-      "confidence": 0.567,
+      "confidence": 0.505,
       "scene_key": "004#0",
       "beat_index": 0
     },
     {
       "id": "c001",
       "source": {
-        "path": "raw/001.mp4"
+        "path": "raw/002.mp4"
       },
       "source_range": {
-        "start": 4.159433,
-        "end": 5.840567
+        "start": 0.0,
+        "end": 4.0
       },
-      "timeline_start": 1.6285260000000004,
+      "timeline_start": 2.6,
       "speed": 1.0,
       "transition_in": {
         "kind": "dissolve",
@@ -77,20 +61,20 @@
       "framing": null,
       "mute_source_audio": true,
       "reason": "Heuristic pick: highest-ranked candidate by duration, quality and variety. No semantic matching - revise this.",
-      "confidence": 0.565,
-      "scene_key": "001#2",
-      "beat_index": 2
+      "confidence": 0.443,
+      "scene_key": "002#0",
+      "beat_index": 1
     },
     {
       "id": "c002",
       "source": {
-        "path": "raw/002.mp4"
+        "path": "raw/001.mp4"
       },
       "source_range": {
-        "start": 0.6128799999999999,
-        "end": 3.3871200000000004
+        "start": 4.0,
+        "end": 6.0
       },
-      "timeline_start": 2.9096600000000006,
+      "timeline_start": 6.199999999999999,
       "speed": 1.0,
       "transition_in": {
         "kind": "dissolve",
@@ -100,36 +84,36 @@
       "framing": null,
       "mute_source_audio": true,
       "reason": "Heuristic pick: highest-ranked candidate by duration, quality and variety. No semantic matching - revise this.",
-      "confidence": 0.452,
-      "scene_key": "002#0",
-      "beat_index": 3
+      "confidence": 0.442,
+      "scene_key": "001#2",
+      "beat_index": 2
     }
   ],
   "subtitles": [
     {
       "range": {
-        "start": 0.0,
-        "end": 1.901542
+        "start": 0.125,
+        "end": 3.1625
       },
-      "text": "First, prepare the soil.",
+      "text": "Đầu tiên chuẩn bị đất cho thật tơi và sạch\ncỏ",
       "style_id": "default",
       "words": []
     },
     {
       "range": {
-        "start": 2.0285260000000003,
-        "end": 3.269660000000001
+        "start": 4.483,
+        "end": 7.6705
       },
-      "text": "Then water it well.",
+      "text": "Sau đó tưới nước cho kỹ nhưng đừng để đọng\nnước ở gốc",
       "style_id": "default",
       "words": []
     },
     {
       "range": {
-        "start": 3.309660000000001,
-        "end": 5.662948000000002
+        "start": 8.997499999999999,
+        "end": 11.9475
       },
-      "text": "Finally, add some mulch around the base.",
+      "text": "Cuối cùng phủ một lớp mùn mỏng quanh gốc\nđể giữ ẩm",
       "style_id": "default",
       "words": []
     }

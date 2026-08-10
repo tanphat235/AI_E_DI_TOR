@@ -15,10 +15,13 @@ digest and ``--full`` must be the opt-in.
 **3. Errors are structured.** A non-zero exit plus a JSON error object carrying a
 stable ``code`` and an actionable ``hint``, so the agent can correct itself instead
 of pattern-matching a traceback.
+
+**4. stdout is UTF-8, whatever the console thinks.** See :func:`force_utf8`.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from collections.abc import Iterable, Mapping
@@ -29,6 +32,37 @@ from typing import Any, Final, NoReturn
 from pydantic import BaseModel
 
 from app.utils.logging import is_quiet, stderr_console
+
+
+def force_utf8() -> None:
+    """Pin stdout and stderr to UTF-8.
+
+    Without this, AIVE is unusable for any project that is not in English. A Windows
+    console hands Python ``cp1252``, and cp1252 cannot encode Vietnamese — so the moment a
+    digest carried a narration line, ``sys.stdout.write`` raised ``UnicodeEncodeError`` and
+    the command died with exit 70 and the message "This is a bug in AIVE".
+
+    It was, and a whole test suite missed it: ``CliRunner`` captures output in memory as
+    UTF-8 and never touches the real console encoding, so every test passed while
+    ``aive analyze audio`` on a Vietnamese narration could not print its own result.
+
+    UTF-8 is also simply *correct* here rather than a workaround. stdout is a machine
+    contract that carries JSON, and JSON is defined as UTF-8.
+
+    ``errors="replace"`` on stderr only: a mangled character in a human-facing log beats a
+    crash, whereas stdout must either be exactly right or fail loudly, because a director
+    parses it.
+    """
+    for stream, errors in ((sys.stdout, "strict"), (sys.stderr, "replace")):
+        # A stream replaced by a test harness or a pipe wrapper may not be reconfigurable.
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        # Suppressed rather than raised: this runs before anything has printed, and a
+        # console that refuses reconfiguration is still usable for an ASCII project.
+        with contextlib.suppress(ValueError, OSError):
+            reconfigure(encoding="utf-8", errors=errors)
+
 
 JSON_INDENT: Final = 2
 """Indent for stdout JSON.

@@ -179,7 +179,13 @@ class FFmpegRenderer:
         )
         logger.debug("Filter graph: %s", graph.filter_complex())
 
-        self._run(command, graph=graph, log_file=log_file, on_progress=on_progress)
+        self._run(
+            command,
+            graph=graph,
+            log_file=log_file,
+            work_dir=request.destination.parent,
+            on_progress=on_progress,
+        )
 
         elapsed = time.monotonic() - started
         logger.info("Rendered %s in %.1fs", request.destination.name, elapsed)
@@ -254,7 +260,14 @@ class FFmpegRenderer:
         command += ["-t", f"{graph.duration:.6f}"]
         # +faststart moves the index to the front, so the result streams and scrubs properly
         # in a browser rather than needing a full download first.
-        command += ["-movflags", "+faststart", str(request.destination)]
+        #
+        # Absolute, and it has to be: _run sets FFmpeg's working directory to the log folder
+        # so the subtitle filter can take a bare filename (see the module docstring). A
+        # relative `-o` is then resolved against *that* folder, and `aive render -o
+        # ./out/x.mp4` failed with "No such file or directory" while an absolute path worked.
+        # Every other path in this command already comes from resolve_within(); this one
+        # comes straight from the caller.
+        command += ["-movflags", "+faststart", str(request.destination.resolve())]
         return command
 
     def _run(
@@ -263,14 +276,20 @@ class FFmpegRenderer:
         *,
         graph: RenderGraph,
         log_file: Path,
+        work_dir: Path,
         on_progress: ProgressCallback | None,
     ) -> None:
-        """Run FFmpeg, streaming progress and capturing the log."""
+        """Run FFmpeg, streaming progress and capturing the log.
+
+        ``work_dir`` is the folder the bare subtitle filename in the graph resolves against,
+        so it must be the one the ASS file was written to.
+        """
         render = self._settings.render
         interval = render.progress_interval
         last_report = 0.0
 
         log_file.parent.mkdir(parents=True, exist_ok=True)
+        work_dir.mkdir(parents=True, exist_ok=True)
         with log_file.open("w", encoding="utf-8", errors="replace") as log:
             log.write(" ".join(command) + "\n\n")
             log.flush()
@@ -285,8 +304,10 @@ class FFmpegRenderer:
                     encoding="utf-8",
                     errors="replace",
                     # See the module docstring: this is what keeps the subtitle filename
-                    # free of drive letters and backslashes.
-                    cwd=str(log_file.parent),
+                    # free of drive letters and backslashes. It must be the folder holding
+                    # the ASS file - the *output* folder, not the log folder one level down,
+                    # which is where this used to point and which made burn-in impossible.
+                    cwd=str(work_dir),
                 )
             except OSError as exc:
                 msg = f"could not start ffmpeg: {exc}"

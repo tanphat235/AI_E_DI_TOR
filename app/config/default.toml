@@ -223,6 +223,23 @@ audio_bitrate = "192k"
 audio_sample_rate = 48000
 
 # ---------------------------------------------------------------------------
+# Speech synthesis - a written script becomes a narration track
+# ---------------------------------------------------------------------------
+[tts]
+# 'sapi'  = Windows' own voices. Offline, no dependency, no network call, but only
+#           the voices installed in Windows (a stock install has English only).
+# 'edge'  = Microsoft Edge's free read-aloud service. No account, no API key, and the
+#           only good Vietnamese voices - but it CALLS THE NETWORK, which nothing else
+#           in AIVE does. Install with: pip install -e ".[tts]"
+backend = "sapi"
+voice = ""                      # empty = pick a default for `language`
+language = "vi"
+rate = 1.0                      # speaking rate multiplier; 1.0 is the voice's own pace
+gap = 0.35                      # silence after each line, in seconds
+max_words_per_line = 0          # 0 = one paragraph is exactly one beat
+keep_parts = true               # keep per-line audio so one line can be redone alone
+
+# ---------------------------------------------------------------------------
 # Phase 7 - the renderer itself
 # ---------------------------------------------------------------------------
 [render]

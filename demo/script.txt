@@ -1,0 +1,6 @@
+# Kịch bản demo - dòng bắt đầu bằng # không được đọc
+Đầu tiên, chuẩn bị đất cho thật tơi và sạch cỏ.
+
+Sau đó tưới nước cho kỹ, nhưng đừng để đọng nước ở gốc.
+
+Cuối cùng, phủ một lớp mùn mỏng quanh gốc để giữ ẩm.

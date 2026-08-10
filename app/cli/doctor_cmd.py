@@ -31,6 +31,7 @@ OPTIONAL_MODULES: tuple[tuple[str, str, str], ...] = (
     ("numpy", "audio", "music features and video metrics"),
     ("av", "audio", "media probing and audio decoding"),
     ("PySide6", "ui", "desktop UI"),
+    ("edge_tts", "tts", "script-to-speech with Vietnamese voices (CALLS THE NETWORK)"),
 )
 """Optional imports, as ``(module, extra, what it unlocks)``.
 

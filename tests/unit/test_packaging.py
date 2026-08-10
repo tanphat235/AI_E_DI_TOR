@@ -165,14 +165,27 @@ class TestDependencies:
 
         assert unused == [], f"declared but never imported: {unused}"
 
-    def test_the_all_extra_covers_every_functional_extra(self, manifest: dict) -> None:
-        """`all` exists so a user need not reason about extras; missing one defeats it."""
+    def test_the_all_extra_covers_every_offline_extra(self, manifest: dict) -> None:
+        """`all` exists so a user need not reason about extras; missing one defeats it.
+
+        ``tts`` is the deliberate exception and is asserted separately below. Everything
+        else has to be in here, so adding a new extra and forgetting it fails.
+        """
         extras = manifest["project"]["optional-dependencies"]
         functional = {
-            name for name, group in extras.items() if name not in {"all", "dev"} and group
+            name for name, group in extras.items() if name not in {"all", "dev", "tts"} and group
         }
         covered = {item.removeprefix("aive[").removesuffix("]") for item in extras["all"]}
         assert functional <= covered
+
+    def test_all_does_not_pull_in_the_network_calling_extra(self, manifest: dict) -> None:
+        """AIVE's core promise is that it makes no network call, and `edge-tts` is the one
+        component that would. Installing it has to be a deliberate act, so `pip install
+        aive[all]` must not do it behind the user's back."""
+        extras = manifest["project"]["optional-dependencies"]
+        covered = {item.removeprefix("aive[").removesuffix("]") for item in extras["all"]}
+        assert "tts" not in covered
+        assert extras["tts"], "the tts extra should still exist, just not be in `all`"
 
     def test_the_version_matches_the_package(self, manifest: dict) -> None:
         """`aive --version` reads ``app.__version__``; the wheel reads pyproject. A mismatch

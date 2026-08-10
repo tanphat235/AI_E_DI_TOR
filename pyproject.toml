@@ -61,12 +61,20 @@ audio = ["numpy>=2.0", "av>=13.0"]                                   # Phase 7
 # pysubs2. Both were removed in Phase 10 rather than left as decorative requirements.
 render = []                                                          # Phase 7
 ui = ["PySide6>=6.8"]                                                # Phase 9
+# Speech SYNTHESIS, as opposed to recognition. Its own extra and not part of `all`,
+# because this is the one component in AIVE that makes a network call: edge-tts talks to
+# Microsoft's read-aloud service. It needs no account and no API key, and it has the only
+# good Vietnamese voices - but installing it has to be a deliberate act. The default
+# backend (Windows SAPI) needs nothing at all and stays offline.
+tts = ["edge-tts>=6.1"]
 # Everything, for a user who does not want to think about extras.
 all = [
     "aive[speech]",
     "aive[video]",
     "aive[audio]",
     "aive[ui]",
+    # `tts` is deliberately absent: it is the only network-calling component, so `all`
+    # must not pull it in behind the user's back.
 ]
 dev = [
     "pytest>=8.3",

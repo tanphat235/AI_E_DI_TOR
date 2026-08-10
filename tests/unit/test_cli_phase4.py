@@ -435,6 +435,7 @@ class TestDiscoverability:
             "config",
             "render",
             "export",
+            "narrate",
             "ui",
             "doctor",
         }
