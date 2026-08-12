@@ -266,7 +266,7 @@ def run_step(step_id: StepId, root: Path, *, on_progress: ProgressFn | None = No
         case StepId.SCAN:
             return _scan(paths)
         case StepId.ANALYZE_AUDIO:
-            return _analyze_audio(paths, container)
+            return _analyze_audio(paths, container, report=report)
         case StepId.ANALYZE_VIDEO:
             return _analyze_video(paths, container)
         case StepId.ANALYZE_MUSIC:
@@ -297,7 +297,7 @@ def _scan(paths: ProjectPaths) -> StepResult:
     )
 
 
-def _analyze_audio(paths: ProjectPaths, container: object) -> StepResult:
+def _analyze_audio(paths: ProjectPaths, container: object, *, report: ProgressFn) -> StepResult:
     from datetime import UTC, datetime
 
     from app.analysis.speech.beats import NarrationBeatBuilder
@@ -317,7 +317,9 @@ def _analyze_audio(paths: ProjectPaths, container: object) -> StepResult:
         raise RuntimeError(msg)
 
     ref = paths.to_ref(narration_path)
-    transcript = recognizer.transcribe(narration_path, ref=ref)
+    # Transcription dominates this step, so its fraction is the step's fraction. The
+    # cleanup and beat passes that follow are milliseconds by comparison.
+    transcript = recognizer.transcribe(narration_path, ref=ref, on_progress=report)
     cleanup = cleaner.clean(transcript, audio=narration_path)
     beats = NarrationBeatBuilder().build(transcript, cleanup)
 

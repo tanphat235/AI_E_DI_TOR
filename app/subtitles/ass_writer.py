@@ -193,16 +193,43 @@ def karaoke_text(cue: SubtitleCue) -> str:
     lasts. Gaps between words are folded into the following word's duration rather than
     emitted as separate empty tags, which keeps the sweep continuous instead of
     stuttering between words.
+
+    The line breaks in :attr:`~app.models.edit_plan.SubtitleCue.text` are preserved.
+    They have to be: this function used to build its output from ``words`` alone, which
+    silently discarded them and rendered every cue as one line. A two-line cue then ran
+    off both edges of the frame - and only in karaoke mode, so ``max_chars_per_line``
+    appeared to work right up until the moment it was switched on.
     """
-    parts: list[str] = []
+    groups = _words_per_line(cue)
+    lines: list[str] = []
     cursor = cue.range.start
-    for text, _start, end in cue.words:
-        # Measure from the cursor, not from the word's own start, so any gap since the
-        # previous word is absorbed and the highlight sweeps continuously.
-        duration_cs = max(1, round((end - cursor) * 100))
-        parts.append(f"{{\\k{duration_cs}}}{escape_text(text)}")
-        cursor = end
-    return " ".join(parts)
+    index = 0
+    for count in groups:
+        parts: list[str] = []
+        for text, _start, end in cue.words[index : index + count]:
+            # Measure from the cursor, not from the word's own start, so any gap since
+            # the previous word is absorbed and the highlight sweeps continuously.
+            duration_cs = max(1, round((end - cursor) * 100))
+            parts.append(f"{{\\k{duration_cs}}}{escape_text(text)}")
+            cursor = end
+        lines.append(" ".join(parts))
+        index += count
+    # Already escaped word by word, so the separator is written raw.
+    return "\\N".join(line for line in lines if line)
+
+
+def _words_per_line(cue: SubtitleCue) -> list[int]:
+    """How many of ``cue.words`` belong on each line of ``cue.text``.
+
+    Falls back to a single line when the two disagree. ``text`` is authored and
+    ``words`` are measured, so nothing guarantees they tokenise alike; when they do
+    not, one long line is a cosmetic problem, whereas splitting at the wrong index
+    would attach a word's highlight to the wrong syllable.
+    """
+    counts = [len(line.split()) for line in cue.text.splitlines() if line.strip()]
+    if not counts or sum(counts) != len(cue.words):
+        return [len(cue.words)]
+    return counts
 
 
 def escape_text(text: str) -> str:

@@ -11,6 +11,7 @@ said - so everything around it is kept terse.
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
@@ -19,6 +20,7 @@ import typer
 
 from app.analysis.audio.analyzer import TrackFailure
 from app.analysis.audio.base import AudioDependencyMissingError
+from app.analysis.speech.base import ProgressCallback
 from app.analysis.speech.beats import BEATS_VERSION, NarrationBeatBuilder
 from app.analysis.speech.cleanup import CLEANUP_VERSION
 from app.analysis.speech.whisper_recognizer import (
@@ -126,7 +128,9 @@ def audio(
 
     note(f"Transcribing {ref} with {settings.speech.model} (this can take a while)")
     try:
-        transcript = recognizer.transcribe(narration_path, ref=ref)
+        transcript = recognizer.transcribe(
+            narration_path, ref=ref, on_progress=_transcription_progress()
+        )
     except SpeechDependencyMissingError as exc:
         emit_error(
             "dependency.missing",
@@ -404,6 +408,63 @@ def _people(scene: object) -> str:
 def _with_speech_overrides(project_root: Path, overrides: dict[str, object]) -> AiveSettings:
     """Settings with CLI speech flags applied on top of every config layer."""
     return load_settings(project_root, speech=overrides)
+
+
+PROGRESS_INTERVAL = 15.0
+"""Seconds between transcription progress lines.
+
+Whisper yields a segment every few seconds of audio, which on a long file is several
+per second of wall time. Printing all of them buries the rest of the log; printing
+none is what made a thirty-five-minute run indistinguishable from a hang.
+"""
+
+
+def _transcription_progress() -> ProgressCallback:
+    """A throttled stderr reporter for transcription.
+
+    Throttling lives here rather than in the recogniser deliberately: the recogniser
+    reports every segment and stays ignorant of presentation, which is what lets the
+    desktop UI drive a smooth progress bar from the same callback.
+
+    The ETA is derived from elapsed wall time rather than from a speed field, because
+    faster-whisper has no equivalent of FFmpeg's ``speed``.
+
+    The clock starts at the *first* report, not here. Loading a model takes tens of
+    seconds and downloading one takes minutes, none of which is decoding: timing from
+    construction charged all of it to the first percent and produced "~21m left" on a
+    file that finished in 68 seconds. The first line therefore carries no estimate,
+    which is the honest thing to show when nothing has been measured yet.
+    """
+    started: float | None = None
+    last_printed = 0.0
+
+    def report(fraction: float, detail: str) -> None:
+        nonlocal started, last_printed
+        now = time.monotonic()
+        if started is None:
+            started = now
+        if fraction < 1.0 and now - last_printed < PROGRESS_INTERVAL:
+            return
+        last_printed = now
+
+        elapsed = now - started
+        suffix = ""
+        if 0.0 < fraction < 1.0 and elapsed > 0.0:
+            remaining = elapsed / fraction - elapsed
+            suffix = f", ~{_duration(remaining)} left"
+        note(f"  {fraction * 100:5.1f}%  {detail}{suffix}")
+
+    return report
+
+
+def _duration(seconds: float) -> str:
+    """A rough human duration: ``45s``, ``12m``, ``1h20m``."""
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m"
+    return f"{total // 3600}h{total % 3600 // 60:02d}m"
 
 
 def _keep_everything(transcript: Transcript) -> SpeechCleanupReport:

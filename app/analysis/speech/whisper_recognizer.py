@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from app.analysis.speech.base import ProgressCallback
 from app.config.settings import SpeechSettings, WhisperDevice
 from app.models.common import MediaRef, TimeRange
 from app.models.speech import Transcript, TranscriptSegment, Word
@@ -37,6 +38,14 @@ logger = get_logger(__name__)
 
 RECOGNIZER_VERSION = "faster-whisper/1"
 """Bumped when a change here would alter output for identical input."""
+
+_PROGRESS_CEILING = 0.999
+"""Cap on reported progress before the generator is exhausted.
+
+The same reasoning as the renderer's: a bar that reads 100% while the model is still
+decoding is worse than one that sits at 99.9%. Whisper's final segment can also end
+slightly past ``info.duration``, which would otherwise report above 100%.
+"""
 
 
 class SpeechDependencyMissingError(RuntimeError):
@@ -186,20 +195,30 @@ class FasterWhisperRecognizer:
 
     # -- Transcription ------------------------------------------------------ #
 
-    def transcribe(self, audio: Path, *, ref: MediaRef) -> Transcript:
+    def transcribe(
+        self,
+        audio: Path,
+        *,
+        ref: MediaRef,
+        on_progress: ProgressCallback | None = None,
+    ) -> Transcript:
         """Recognise speech in ``audio``.
 
         Args:
             audio: Absolute path to read.
             ref: Project-relative reference recorded in the result, so the transcript
                 stays portable while the read stays absolute.
+            on_progress: Called with ``(fraction, detail)`` as each segment arrives.
+                Progress is measured in *audio position*, not segments decoded: the
+                segment count is unknown until the end, but the duration is known up
+                front, which is what makes a percentage meaningful at all.
         """
         if not audio.is_file():
             msg = f"narration audio not found: {audio}"
             raise FileNotFoundError(msg)
 
         with stage(logger, f"Transcribing {ref}", audio=str(audio)):
-            segments, info = self._run(audio)
+            segments, info = self._run(audio, on_progress=on_progress)
 
         kept, dropped = self._filter_hallucinations(segments)
         if dropped:
@@ -231,7 +250,9 @@ class FasterWhisperRecognizer:
             ),
         )
 
-    def _run(self, audio: Path) -> tuple[list[TranscriptSegment], Any]:
+    def _run(
+        self, audio: Path, *, on_progress: ProgressCallback | None = None
+    ) -> tuple[list[TranscriptSegment], Any]:
         """Transcribe, falling back to the CPU if the GPU turns out to be unusable.
 
         The library check in :meth:`_cuda_available` catches the common case up front,
@@ -244,7 +265,7 @@ class FasterWhisperRecognizer:
         the CPU path still surfaces as an error rather than looping.
         """
         try:
-            return self._attempt(audio)
+            return self._attempt(audio, on_progress=on_progress)
         except RuntimeError as exc:
             device, _ = self._resolve_device()
             if device != "cuda" or not _is_cuda_environment_failure(exc):
@@ -257,9 +278,11 @@ class FasterWhisperRecognizer:
             # Drop the GPU model so the retry rebuilds on the CPU.
             self._model = None
             self._forced_device = "cpu"
-            return self._attempt(audio)
+            return self._attempt(audio, on_progress=on_progress)
 
-    def _attempt(self, audio: Path) -> tuple[list[TranscriptSegment], Any]:
+    def _attempt(
+        self, audio: Path, *, on_progress: ProgressCallback | None = None
+    ) -> tuple[list[TranscriptSegment], Any]:
         model = self._load_model()
         settings = self._settings
         raw_segments, info = model.transcribe(
@@ -270,16 +293,38 @@ class FasterWhisperRecognizer:
             vad_filter=settings.vad_filter,
             condition_on_previous_text=settings.condition_on_previous_text,
         )
+        # `info` is returned eagerly - language detection and the VAD pre-pass have
+        # already run - so its duration is available as a denominator before a single
+        # segment has been decoded. That is what makes a percentage possible here.
+        total = float(getattr(info, "duration", 0.0) or 0.0)
         # faster-whisper returns a lazy generator: recognition runs as it is consumed,
         # so any device failure surfaces here rather than at the call above.
-        return self._collect_segments(raw_segments), info
+        segments = self._collect_segments(raw_segments, total=total, on_progress=on_progress)
+        if on_progress is not None:
+            on_progress(1.0, f"{_timecode(total)} of {_timecode(total)}")
+        return segments, info
 
-    def _collect_segments(self, raw_segments: Any) -> list[TranscriptSegment]:
-        """Convert faster-whisper segments into our models."""
+    def _collect_segments(
+        self,
+        raw_segments: Any,
+        *,
+        total: float = 0.0,
+        on_progress: ProgressCallback | None = None,
+    ) -> list[TranscriptSegment]:
+        """Convert faster-whisper segments into our models.
+
+        This loop is where recognition actually happens - the generator decodes on
+        demand - which makes it the only place that can report progress.
+        """
         collected: list[TranscriptSegment] = []
         for index, raw in enumerate(raw_segments):
             text = str(raw.text).strip()
             start, end = float(raw.start), float(raw.end)
+            if on_progress is not None and total > 0.0:
+                # Reported before the skip below: a discarded artefact still cost the
+                # time to decode, so it is honest progress.
+                fraction = min(_PROGRESS_CEILING, max(0.0, end / total))
+                on_progress(fraction, f"{_timecode(end)} of {_timecode(total)}")
             if not text or end <= start:
                 # Zero-length or empty segments are artefacts, not speech.
                 continue
@@ -414,6 +459,16 @@ def _clamp_score(value: object) -> float:
     be an unreasonable way to lose the result.
     """
     return min(1.0, max(0.0, float(value)))  # type: ignore[arg-type]
+
+
+def _timecode(seconds: float) -> str:
+    """Format a position as ``H:MM:SS``.
+
+    Bare seconds are unreadable at this scale: "8420.3s of 12970.3s" says far less
+    about how much of a lecture is left than "2:20:20 of 3:36:10" does.
+    """
+    total = max(0, int(seconds))
+    return f"{total // 3600:d}:{total % 3600 // 60:02d}:{total % 60:02d}"
 
 
 __all__ = ["RECOGNIZER_VERSION", "FasterWhisperRecognizer", "SpeechDependencyMissingError"]

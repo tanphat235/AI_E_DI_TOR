@@ -412,9 +412,7 @@ class TestSubtitleSidecars:
         request = _request(plan, project)
         assert _renderer()._subtitle_to_burn(request, ()) is None
 
-    def test_the_burned_ass_sits_in_the_directory_ffmpeg_will_run_in(
-        self, project: Path
-    ) -> None:
+    def test_the_burned_ass_sits_in_the_directory_ffmpeg_will_run_in(self, project: Path) -> None:
         """The graph names the ASS file with no path, so cwd has to be its folder.
 
         This shipped broken: FFmpeg was run in ``output/logs`` (from ``log_file.parent``)

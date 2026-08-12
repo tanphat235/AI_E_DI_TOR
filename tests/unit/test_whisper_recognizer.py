@@ -11,6 +11,7 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -181,7 +182,10 @@ class TestTranscription:
         monkeypatch.setattr(
             recognizer,
             "_attempt",
-            lambda _audio: (recognizer._collect_segments(segments), info or FakeInfo()),
+            lambda _audio, **_kwargs: (
+                recognizer._collect_segments(segments),
+                info or FakeInfo(),
+            ),
         )
         return recognizer
 
@@ -301,6 +305,100 @@ class TestTranscription:
             recognizer.transcribe(audio, ref=MediaRef(path="narration.wav"))
 
 
+class TestProgressReporting:
+    """Transcribing a three-hour file is the one operation long enough that silence
+    is indistinguishable from a hang, which is what these guard."""
+
+    @pytest.fixture
+    def audio(self, tmp_path: Path) -> Path:
+        path = tmp_path / "narration.wav"
+        path.write_bytes(b"RIFF" + b"\0" * 64)
+        return path
+
+    @staticmethod
+    def _collect(
+        monkeypatch: pytest.MonkeyPatch,
+        audio: Path,
+        segments: list[FakeSegment],
+        *,
+        duration: float = 10.0,
+    ) -> list[tuple[float, str]]:
+        recognizer = FasterWhisperRecognizer(SpeechSettings())
+        seen: list[tuple[float, str]] = []
+        monkeypatch.setattr(
+            recognizer,
+            "_load_model",
+            lambda: SimpleNamespace(
+                transcribe=lambda *_a, **_k: (iter(segments), FakeInfo(duration=duration))
+            ),
+        )
+        recognizer.transcribe(
+            audio,
+            ref=MediaRef(path="narration.wav"),
+            on_progress=lambda fraction, detail: seen.append((fraction, detail)),
+        )
+        return seen
+
+    def test_progress_tracks_audio_position_not_segment_count(
+        self, monkeypatch: pytest.MonkeyPatch, audio: Path
+    ) -> None:
+        """The denominator is the duration, which is known up front; the segment
+        count is not known until the generator is exhausted."""
+        seen = self._collect(
+            monkeypatch,
+            audio,
+            [FakeSegment("a", 0.0, 2.5), FakeSegment("b", 2.5, 5.0)],
+            duration=10.0,
+        )
+        assert [round(fraction, 3) for fraction, _ in seen[:2]] == [0.25, 0.5]
+
+    def test_the_last_report_is_exactly_one(
+        self, monkeypatch: pytest.MonkeyPatch, audio: Path
+    ) -> None:
+        seen = self._collect(monkeypatch, audio, [FakeSegment("a", 0.0, 10.0)])
+        assert seen[-1][0] == 1.0
+
+    def test_progress_never_exceeds_one_before_completion(
+        self, monkeypatch: pytest.MonkeyPatch, audio: Path
+    ) -> None:
+        """Whisper's final segment can end past the reported duration. Reporting
+        110% would be worse than capping."""
+        seen = self._collect(monkeypatch, audio, [FakeSegment("a", 0.0, 12.0)], duration=10.0)
+        assert all(fraction <= 1.0 for fraction, _ in seen)
+        assert seen[0][0] == pytest.approx(0.999)
+
+    def test_detail_is_a_timecode_not_bare_seconds(
+        self, monkeypatch: pytest.MonkeyPatch, audio: Path
+    ) -> None:
+        seen = self._collect(monkeypatch, audio, [FakeSegment("a", 0.0, 3670.0)], duration=12970.0)
+        assert seen[0][1] == "1:01:10 of 3:36:10"
+
+    def test_a_discarded_segment_still_reports(
+        self, monkeypatch: pytest.MonkeyPatch, audio: Path
+    ) -> None:
+        """An empty segment cost decode time like any other, so hiding it would make
+        progress stall for no visible reason."""
+        seen = self._collect(
+            monkeypatch, audio, [FakeSegment("", 0.0, 5.0), FakeSegment("b", 5.0, 10.0)]
+        )
+        assert seen[0][0] == pytest.approx(0.5)
+
+    def test_transcription_works_without_a_callback(
+        self, monkeypatch: pytest.MonkeyPatch, audio: Path
+    ) -> None:
+        """Every caller predating this passes nothing."""
+        recognizer = FasterWhisperRecognizer(SpeechSettings())
+        monkeypatch.setattr(
+            recognizer,
+            "_load_model",
+            lambda: SimpleNamespace(
+                transcribe=lambda *_a, **_k: (iter([FakeSegment("a", 0.0, 5.0)]), FakeInfo())
+            ),
+        )
+        transcript = recognizer.transcribe(audio, ref=MediaRef(path="narration.wav"))
+        assert len(transcript.segments) == 1
+
+
 class TestHallucinationFiltering:
     @pytest.fixture
     def audio(self, tmp_path: Path) -> Path:
@@ -315,7 +413,7 @@ class TestHallucinationFiltering:
         monkeypatch.setattr(
             recognizer,
             "_attempt",
-            lambda _a: (recognizer._collect_segments(segments), FakeInfo()),
+            lambda _a, **_kwargs: (recognizer._collect_segments(segments), FakeInfo()),
         )
         return recognizer.transcribe(audio, ref=MediaRef(path="narration.wav"))
 
@@ -371,7 +469,9 @@ class TestHallucinationFiltering:
             words = None
 
         monkeypatch.setattr(
-            recognizer, "_attempt", lambda _a: (recognizer._collect_segments([Bare()]), FakeInfo())
+            recognizer,
+            "_attempt",
+            lambda _a, **_kwargs: (recognizer._collect_segments([Bare()]), FakeInfo()),
         )
         transcript = recognizer.transcribe(audio, ref=MediaRef(path="narration.wav"))
         assert len(transcript.segments) == 1
@@ -391,7 +491,7 @@ class TestCpuFallback:
         recognizer = FasterWhisperRecognizer(SpeechSettings(device=WhisperDevice.CUDA))
         attempts: list[str] = []
 
-        def attempt(_audio: Path) -> tuple[list[Any], FakeInfo]:
+        def attempt(_audio: Path, **_kwargs: object) -> tuple[list[Any], FakeInfo]:
             device, _ = recognizer._resolve_device()
             attempts.append(device)
             if device == "cuda":
@@ -409,7 +509,7 @@ class TestCpuFallback:
     ) -> None:
         recognizer = FasterWhisperRecognizer(SpeechSettings(device=WhisperDevice.CUDA))
 
-        def attempt(_audio: Path) -> tuple[list[Any], FakeInfo]:
+        def attempt(_audio: Path, **_kwargs: object) -> tuple[list[Any], FakeInfo]:
             raise RuntimeError("list index out of range")
 
         monkeypatch.setattr(recognizer, "_attempt", attempt)
@@ -423,7 +523,7 @@ class TestCpuFallback:
         recognizer = FasterWhisperRecognizer(SpeechSettings(device=WhisperDevice.CPU))
         calls = 0
 
-        def attempt(_audio: Path) -> tuple[list[Any], FakeInfo]:
+        def attempt(_audio: Path, **_kwargs: object) -> tuple[list[Any], FakeInfo]:
             nonlocal calls
             calls += 1
             raise RuntimeError("cublas is not found or cannot be loaded")

@@ -9,11 +9,23 @@ lets tests substitute a plain object returning a canned
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from app.models.common import MediaRef
 from app.models.speech import SilenceSpan, SpeechCleanupReport, Transcript
+
+ProgressCallback = Callable[[float, str], None]
+"""Reports progress as ``(fraction_complete, description)``.
+
+Mirrors :data:`app.renderer.base.ProgressCallback` in shape but is declared separately:
+analysis must not import from the renderer, and the two are free to diverge.
+
+Injected rather than baked in for the same reason the renderer's is - transcribing a
+three-hour lecture takes tens of minutes, and the console, the desktop UI and a test
+each want to observe that differently.
+"""
 
 
 @runtime_checkable
@@ -62,13 +74,22 @@ class SpeechRecognizer(Protocol):
         """
         ...
 
-    def transcribe(self, audio: Path, *, ref: MediaRef) -> Transcript:
+    def transcribe(
+        self,
+        audio: Path,
+        *,
+        ref: MediaRef,
+        on_progress: ProgressCallback | None = None,
+    ) -> Transcript:
         """Recognise speech in ``audio``.
 
         Args:
             audio: Absolute path to the audio file to read.
             ref: Project-relative reference recorded in the result, so the
                 transcript stays portable while the read stays absolute.
+            on_progress: Called as recognition advances. Optional because a
+                recogniser fast enough to need no reporting is a legitimate
+                implementation, and every existing caller predates this.
         """
         ...
 
@@ -88,4 +109,4 @@ class NarrationCleaner(Protocol):
         ...
 
 
-__all__ = ["NarrationCleaner", "SilenceDetector", "SpeechRecognizer"]
+__all__ = ["NarrationCleaner", "ProgressCallback", "SilenceDetector", "SpeechRecognizer"]

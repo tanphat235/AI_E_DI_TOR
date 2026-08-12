@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from app.analysis.speech.base import ProgressCallback
 from app.cli import analyze_cmd
 from app.cli.main import app
 from app.models.common import MediaRef, TimeRange
@@ -87,8 +88,21 @@ class FakeRecognizer:
     def name(self) -> str:
         return f"faster-whisper/{self.model}"
 
-    def transcribe(self, audio: Path, *, ref: MediaRef) -> Transcript:
+    def transcribe(
+        self,
+        audio: Path,
+        *,
+        ref: MediaRef,
+        on_progress: ProgressCallback | None = None,
+    ) -> Transcript:
         self.calls += 1
+        self.progress_calls: list[tuple[float, str]] = getattr(self, "progress_calls", [])
+        if on_progress is not None:
+            # Two reports, so a test can assert the CLI survives being driven and
+            # that it does not print the same line twice.
+            for fraction in (0.5, 1.0):
+                on_progress(fraction, f"{fraction:.0%}")
+                self.progress_calls.append((fraction, f"{fraction:.0%}"))
         if callable(self._override):
             return self._override(ref)
         return _fake_transcript(ref, self.model)

@@ -441,6 +441,64 @@ class TestAssEscaping:
         assert "{\\k1}" in karaoke_text(cue)
 
 
+class TestKaraokeLineBreaks:
+    """Karaoke used to build its output from ``words`` alone, discarding the line
+    breaks in ``text``. Every cue then rendered as one line and a wrapped cue ran off
+    both edges of the frame - and only with karaoke on, so ``max_chars_per_line``
+    looked correct until the moment it was enabled."""
+
+    def test_a_wrapped_cue_keeps_its_break(self) -> None:
+        cue = _cue(
+            0.0,
+            2.0,
+            "Dig the soil\nthen plant",
+            words=(
+                ("Dig", 0.0, 0.3),
+                ("the", 0.3, 0.6),
+                ("soil", 0.6, 1.0),
+                ("then", 1.2, 1.6),
+                ("plant", 1.6, 2.0),
+            ),
+        )
+        rendered = karaoke_text(cue)
+        assert "\\N" in rendered
+        assert rendered.count("\\N") == 1
+        assert rendered.split("\\N")[0].endswith("soil")
+        assert rendered.split("\\N")[1].startswith("{\\k")
+
+    def test_every_word_still_gets_a_tag_across_the_break(self) -> None:
+        cue = _cue(
+            0.0,
+            2.0,
+            "one two\nthree",
+            words=(("one", 0.0, 0.5), ("two", 0.5, 1.0), ("three", 1.0, 2.0)),
+        )
+        assert karaoke_text(cue).count("{\\k") == 3
+
+    def test_the_sweep_does_not_restart_at_a_line_break(self) -> None:
+        """The cursor carries across lines; restarting it would re-highlight time
+        that has already elapsed."""
+        cue = _cue(0.0, 2.0, "a\nb", words=(("a", 0.0, 1.0), ("b", 1.0, 2.0)))
+        assert karaoke_text(cue) == "{\\k100}a\\N{\\k100}b"
+
+    def test_a_single_line_cue_gains_no_break(self) -> None:
+        cue = _cue(0.0, 1.0, "Dig soil", words=(("Dig", 0.0, 0.3), ("soil", 0.4, 1.0)))
+        assert "\\N" not in karaoke_text(cue)
+
+    def test_mismatched_text_and_words_fall_back_to_one_line(self) -> None:
+        """``text`` is authored and ``words`` are measured, so nothing guarantees they
+        tokenise alike. Splitting at a guessed index would mistime the highlight."""
+        cue = _cue(
+            0.0,
+            2.0,
+            "completely\ndifferent wording here",
+            words=(("a", 0.0, 1.0), ("b", 1.0, 2.0)),
+        )
+        rendered = karaoke_text(cue)
+        assert "\\N" not in rendered
+        assert rendered.count("{\\k") == 2
+
+
 class TestRegistry:
     def test_srt_lookup(self) -> None:
         assert isinstance(writer_for(SubtitleFormat.SRT, SubtitleSettings()), SrtWriter)
