@@ -561,9 +561,14 @@ def _export(paths: ProjectPaths, container: object) -> StepResult:
             project_name=plan.project_id,
         )
     )
+    detail_lines = [
+        str(result.project_dir),
+        result.open_hint or "",
+        *result.warnings,
+    ]
     return StepResult(
-        summary=f"draft written, {len(result.media_copied)} file(s) copied",
-        detail="\n".join(result.warnings) or (result.open_hint or ""),
+        summary=f"CapCut draft ready — restart CapCut, open Drafts → {plan.project_id}",
+        detail="\n".join(line for line in detail_lines if line),
         artifact=result.project_dir,
     )
 

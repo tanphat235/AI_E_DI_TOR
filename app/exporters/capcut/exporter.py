@@ -28,7 +28,9 @@ CapCut's entire project list unusable until the user finds and deletes it by han
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,14 +40,33 @@ from app.config.settings import AiveSettings
 from app.exporters.base import ExportRequest, ExportResult
 from app.exporters.capcut import schema
 from app.exporters.capcut.locate import find_draft_dir
-from app.models.common import MediaRef, TransitionKind
-from app.models.edit_plan import EditPlan, MusicCue, SubtitleCue
+from app.models.common import AspectRatio, MediaRef, TransitionKind
+from app.models.edit_plan import EditPlan, MusicCue, OutputSpec, SubtitleCue
 from app.models.media import MediaProbe
+from app.services.ffmpeg_locator import FFmpegLocator, FFmpegNotFoundError
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
 
 EXPORTER_VERSION = f"capcut/1+{schema.TARGET_CAPCUT_VERSION}"
+
+# CapCut's preview player often fails on widths/heights that are not multiples of 8
+# (screen captures like 1908x1032 are a common case). Thumbnails can still appear.
+_DIM_MULTIPLE = 8
+
+_UNSAFE_MEDIA_CHARS = re.compile(r"[^\w.\-]+", re.UNICODE)
+
+# Template drafts carry a Timelines/ tree CapCut regenerates itself. Copying it leaves
+# a second timeline that can open with a black player while the root draft is fine.
+_SKIP_TEMPLATE_NAMES = frozenset(
+    {
+        schema.DRAFT_CONTENT_NAME,
+        schema.DRAFT_META_NAME,
+        "draft_content.json.bak",
+        "Timelines",
+        "media",
+    }
+)
 
 CAPCUT_TRANSITIONS: dict[TransitionKind, str] = {
     TransitionKind.FADE: "Fade",
@@ -83,11 +104,25 @@ class _Media:
     width: int
     height: int
     has_audio: bool
+    normalize_size: tuple[int, int] | None = None
+    """When set, the copy pass re-encodes to this even size so CapCut's preview can play it."""
 
     @property
     def draft_path(self) -> str:
         """The path CapCut stores. Backslashes, because that is what it writes itself."""
         return str(self.destination).replace("/", "\\")
+
+    @property
+    def export_width(self) -> int:
+        if self.normalize_size is not None:
+            return self.normalize_size[0]
+        return self.width
+
+    @property
+    def export_height(self) -> int:
+        if self.normalize_size is not None:
+            return self.normalize_size[1]
+        return self.height
 
 
 class MediaFacts(Protocol):
@@ -107,9 +142,15 @@ class MediaFacts(Protocol):
 class CapCutExporter:
     """An :class:`~app.exporters.base.Exporter` producing a CapCut draft directory."""
 
-    def __init__(self, settings: AiveSettings, prober: MediaFacts | None = None) -> None:
+    def __init__(
+        self,
+        settings: AiveSettings,
+        prober: MediaFacts | None = None,
+        ffmpeg: FFmpegLocator | None = None,
+    ) -> None:
         self._settings = settings
         self._prober = prober
+        self._ffmpeg = ffmpeg
 
     @property
     def name(self) -> str:
@@ -185,20 +226,27 @@ class CapCutExporter:
         warnings: list[str] = []
 
         media = self._resolve_media(request)
+        written, copied, media = self._write(
+            request, draft_dir, media=media, warnings=warnings
+        )
         content = self._build_content(plan, name=name, media=media, warnings=warnings)
         meta = self._build_meta(plan, name=name, draft_dir=draft_dir, media=media)
 
-        written, copied = self._write(request, draft_dir, content=content, meta=meta, media=media)
+        json_written = self._write_documents(draft_dir, content=content, meta=meta)
+        cover = self._ensure_cover(draft_dir, media=media)
+        files = [*json_written, *written]
+        if cover is not None:
+            files.append(cover)
 
         logger.info("Wrote CapCut draft %s (%d file(s) copied)", draft_dir, len(copied))
         return ExportResult(
             project_dir=draft_dir,
-            files_written=written,
+            files_written=tuple(files),
             media_copied=copied,
             warnings=tuple(warnings),
             open_hint=(
-                "restart CapCut if it is running, then look under Drafts for "
-                f"{name!r}. CapCut reads its project list at startup."
+                "restart CapCut if it is running, then open Drafts and select "
+                f"{name!r} at {draft_dir}. CapCut only refreshes that list at startup."
             ),
         )
 
@@ -221,13 +269,25 @@ class CapCutExporter:
             if cue.track not in refs:
                 refs.append(cue.track)
 
+        canvas_w, canvas_h, _ratio = capcut_canvas(plan.output)
+
         media: dict[MediaRef, _Media] = {}
         for ref in refs:
             source = ref.resolve_within(request.project_root)
+            safe_name = safe_media_filename(source.name)
             destination = (
-                request.destination / "media" / source.name if request.copy_media else source
+                request.destination / "media" / safe_name if request.copy_media else source
             )
             duration, width, height, has_audio = self._probe(source)
+            normalize_size: tuple[int, int] | None = None
+            # Pad every video onto the CapCut canvas so the draft uses a standard ratio,
+            # not the source's free aspect (screen captures are rarely exactly 16:9).
+            if width > 0 and (
+                width != canvas_w
+                or height != canvas_h
+                or _needs_preview_normalize(width, height)
+            ):
+                normalize_size = (canvas_w, canvas_h)
             media[ref] = _Media(
                 ref=ref,
                 source=source,
@@ -237,6 +297,7 @@ class CapCutExporter:
                 width=width,
                 height=height,
                 has_audio=has_audio,
+                normalize_size=normalize_size,
             )
         return media
 
@@ -294,10 +355,10 @@ class CapCutExporter:
                     schema.video_material(
                         material_id=item.material_id,
                         path=item.draft_path,
-                        name=item.source.name,
+                        name=item.destination.name,
                         duration=item.duration,
-                        width=item.width,
-                        height=item.height,
+                        width=item.export_width,
+                        height=item.export_height,
                         has_audio=item.has_audio,
                     )
                 )
@@ -306,7 +367,7 @@ class CapCutExporter:
                     schema.audio_material(
                         material_id=item.material_id,
                         path=item.draft_path,
-                        name=item.source.name,
+                        name=item.destination.name,
                         duration=item.duration,
                     )
                 )
@@ -316,15 +377,17 @@ class CapCutExporter:
         if plan.subtitles:
             tracks.append(self._text_track(plan, materials=materials))
 
+        canvas_w, canvas_h, ratio = capcut_canvas(plan.output)
         return schema.draft_content(
             draft_id=schema.stable_id("draft", plan.project_id),
             name=name,
-            width=plan.output.width,
-            height=plan.output.height,
+            width=canvas_w,
+            height=canvas_h,
             fps=plan.output.fps,
             duration=plan.timeline_duration,
             materials=materials,
             tracks=tracks,
+            ratio=ratio,
         )
 
     def _video_track(
@@ -576,8 +639,8 @@ class CapCutExporter:
                     material_id=item.material_id,
                     path=item.draft_path,
                     duration=item.duration,
-                    width=item.width,
-                    height=item.height,
+                    width=item.export_width,
+                    height=item.export_height,
                     kind="video" if item.width > 0 else "music",
                 )
                 for item in media.values()
@@ -591,37 +654,46 @@ class CapCutExporter:
         request: ExportRequest,
         draft_dir: Path,
         *,
-        content: dict[str, Any],
-        meta: dict[str, Any],
         media: dict[MediaRef, _Media],
-    ) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
-        """Create the directory, copy media, then write both documents."""
+        warnings: list[str],
+    ) -> tuple[tuple[Path, ...], tuple[Path, ...], dict[MediaRef, _Media]]:
+        """Create the directory and install media. JSON is written afterwards."""
         try:
             draft_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             msg = f"could not create {draft_dir}: {exc}"
             raise CapCutExportError(msg) from exc
 
+        # Stale Timelines/ from an earlier template export make CapCut open a black player
+        # while the root draft_content is fine. Always clear before writing our timeline.
+        _remove_stale_timelines(draft_dir)
+
         if request.template is not None:
             self._clone_template(request.template, draft_dir)
 
         copied: list[Path] = []
+        updated = dict(media)
         if request.copy_media:
             (draft_dir / "media").mkdir(exist_ok=True)
-            for item in media.values():
+            for ref, item in media.items():
                 try:
-                    # Skipped when already current: re-exporting a forty-clip project should
-                    # not recopy gigabytes that have not changed.
-                    if (
-                        not item.destination.exists()
-                        or item.destination.stat().st_mtime < item.source.stat().st_mtime
-                    ):
-                        shutil.copy2(item.source, item.destination)
-                        copied.append(item.destination)
+                    installed, wrote = self._install_media(item, warnings=warnings)
                 except OSError as exc:
                     msg = f"could not copy {item.source.name}: {exc}"
                     raise CapCutExportError(msg) from exc
+                updated[ref] = installed
+                if wrote:
+                    copied.append(installed.destination)
 
+        return (), tuple(copied), updated
+
+    def _write_documents(
+        self,
+        draft_dir: Path,
+        *,
+        content: dict[str, Any],
+        meta: dict[str, Any],
+    ) -> tuple[Path, ...]:
         written: list[Path] = []
         for filename, document in (
             (schema.DRAFT_CONTENT_NAME, content),
@@ -636,8 +708,170 @@ class CapCutExporter:
                 msg = f"could not write {filename}: {exc}"
                 raise CapCutExportError(msg) from exc
             written.append(path)
+        return tuple(written)
 
-        return tuple(written), tuple(copied)
+    def _install_media(
+        self, item: _Media, *, warnings: list[str]
+    ) -> tuple[_Media, bool]:
+        """Copy or re-encode one media file. Returns (item used, whether written)."""
+        destination = item.destination
+        if (
+            destination.exists()
+            and destination.stat().st_mtime >= item.source.stat().st_mtime
+            and item.normalize_size is None
+        ):
+            return item, False
+
+        if item.normalize_size is not None:
+            if destination.exists() and destination.stat().st_mtime >= item.source.stat().st_mtime:
+                return item, False
+            if self._normalize_video(item):
+                warnings.append(
+                    f"{item.source.name}: re-encoded to {item.normalize_size[0]}x"
+                    f"{item.normalize_size[1]} so CapCut preview can play it"
+                )
+                return item, True
+            logger.warning(
+                "Could not normalise %s for CapCut preview; copying the original",
+                item.source.name,
+            )
+            warnings.append(
+                f"{item.source.name}: could not re-encode for CapCut preview; "
+                "preview may stay black — open output/final.mp4 instead if needed"
+            )
+            shutil.copy2(item.source, destination)
+            return (
+                _Media(
+                    ref=item.ref,
+                    source=item.source,
+                    destination=item.destination,
+                    material_id=item.material_id,
+                    duration=item.duration,
+                    width=item.width,
+                    height=item.height,
+                    has_audio=item.has_audio,
+                    normalize_size=None,
+                ),
+                True,
+            )
+
+        shutil.copy2(item.source, destination)
+        return item, True
+
+    def _normalize_video(self, item: _Media) -> bool:
+        """Re-encode to an even canvas CapCut's player accepts. Returns False on failure."""
+        if item.normalize_size is None or self._ffmpeg is None:
+            return False
+        width, height = item.normalize_size
+        try:
+            tools = self._ffmpeg.resolve()
+        except FFmpegNotFoundError:
+            return False
+
+        filt = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+        )
+        command = [
+            str(tools.ffmpeg.path),
+            "-y",
+            "-i",
+            str(item.source),
+            "-vf",
+            filt,
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "fast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            str(item.destination),
+        ]
+        # Drop audio encode when the source has none — AAC on empty fails on some builds.
+        if not item.has_audio:
+            command = [
+                str(tools.ffmpeg.path),
+                "-y",
+                "-i",
+                str(item.source),
+                "-vf",
+                filt,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "fast",
+                "-crf",
+                "18",
+                "-an",
+                "-movflags",
+                "+faststart",
+                str(item.destination),
+            ]
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=600,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.debug("CapCut media normalise failed for %s: %s", item.source.name, exc)
+            return False
+        if completed.returncode != 0 or not item.destination.is_file():
+            logger.debug(
+                "CapCut media normalise exited %s for %s: %s",
+                completed.returncode,
+                item.source.name,
+                (completed.stderr or "")[-400:],
+            )
+            return False
+        return True
+
+    def _ensure_cover(self, draft_dir: Path, *, media: dict[MediaRef, _Media]) -> Path | None:
+        """Write ``draft_cover.jpg`` so CapCut's Drafts list has a thumbnail."""
+        cover = draft_dir / "draft_cover.jpg"
+        if cover.is_file():
+            return None
+        if self._ffmpeg is None:
+            return None
+        video = next((item for item in media.values() if item.width > 0), None)
+        if video is None or not video.destination.is_file():
+            return None
+        try:
+            tools = self._ffmpeg.resolve()
+        except FFmpegNotFoundError:
+            return None
+        command = [
+            str(tools.ffmpeg.path),
+            "-y",
+            "-ss",
+            "0.5",
+            "-i",
+            str(video.destination),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "4",
+            str(cover),
+        ]
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=True, timeout=60, check=False
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0 or not cover.is_file():
+            return None
+        return cover
 
     @staticmethod
     def _clone_template(template: Path, draft_dir: Path) -> None:
@@ -645,16 +879,94 @@ class CapCutExporter:
 
         A template exists to carry fonts, colour settings and canvas configuration that no
         exporter can reliably invent. Its ``draft_content.json`` is the one thing we are
-        replacing, so copying it would be self-defeating.
+        replacing, so copying it would be self-defeating. ``Timelines/`` is also skipped:
+        CapCut regenerates it, and a copied tree has produced black-preview drafts.
         """
         for item in template.iterdir():
-            if item.name in {schema.DRAFT_CONTENT_NAME, schema.DRAFT_META_NAME}:
+            if item.name in _SKIP_TEMPLATE_NAMES:
                 continue
             target = draft_dir / item.name
             if item.is_dir():
                 shutil.copytree(item, target, dirs_exist_ok=True)
             else:
                 shutil.copy2(item, target)
+
+
+def safe_media_filename(name: str) -> str:
+    """A CapCut-safe media basename.
+
+    Spaces and odd punctuation in paths have shown up as black-preview drafts even when
+    the timeline thumbnails look fine. Keep letters, digits, ``._-``; collapse the rest.
+    """
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    cleaned = _UNSAFE_MEDIA_CHARS.sub("_", stem).strip("._") or "media"
+    return f"{cleaned}{suffix}"
+
+
+def capcut_canvas(output: OutputSpec) -> tuple[int, int, str]:
+    """Pixel size and CapCut ``ratio`` label for a plan's output spec.
+
+    CapCut's project UI expects a *preset* ratio string (``16:9``, ``9:16``, ``1:1``,
+    ``4:5``), not ``original``. Pixel size is snapped to a common CapCut resolution for
+    that ratio so the preview player and project settings agree.
+    """
+    ratio = output.aspect_ratio
+    if ratio not in {
+        AspectRatio.LANDSCAPE,
+        AspectRatio.VERTICAL,
+        AspectRatio.SQUARE,
+        AspectRatio.PORTRAIT_4_5,
+    }:
+        ratio = AspectRatio.LANDSCAPE
+
+    width = output.width if output.width > 0 else 0
+    height = output.height if output.height > 0 else 0
+    hint = max(width, height, 1920)
+    # Prefer an exact preset when the plan is already close (e.g. 1908x1032 → 1920x1080).
+    for preset_w, preset_h in _canvas_presets(ratio):
+        if width > 0 and height > 0:
+            if abs(width - preset_w) <= 48 and abs(height - preset_h) <= 48:
+                return preset_w, preset_h, ratio.value
+        elif abs(hint - max(preset_w, preset_h)) <= 48:
+            return preset_w, preset_h, ratio.value
+
+    if width <= 0 or height <= 0 or abs((width / height) - ratio.ratio) > 0.02:
+        return *_default_canvas_size(ratio, hint), ratio.value
+
+    return _align_dimension(width), _align_dimension(height), ratio.value
+
+
+def _canvas_presets(ratio: AspectRatio) -> tuple[tuple[int, int], ...]:
+    presets: dict[AspectRatio, tuple[tuple[int, int], ...]] = {
+        AspectRatio.LANDSCAPE: ((3840, 2160), (1920, 1080), (1280, 720)),
+        AspectRatio.VERTICAL: ((1080, 1920), (720, 1280)),
+        AspectRatio.SQUARE: ((1080, 1080), (720, 720)),
+        AspectRatio.PORTRAIT_4_5: ((1080, 1350), (864, 1080)),
+    }
+    return presets.get(ratio, ((1920, 1080),))
+
+
+def _default_canvas_size(ratio: AspectRatio, long_edge_hint: int = 1920) -> tuple[int, int]:
+    presets = _canvas_presets(ratio)
+    if not presets:
+        return (1920, 1080)
+    return min(presets, key=lambda size: abs(max(size) - long_edge_hint))
+
+def _align_dimension(value: int, multiple: int = _DIM_MULTIPLE) -> int:
+    if value <= 0:
+        return value
+    return max(multiple, ((value + multiple - 1) // multiple) * multiple)
+
+
+def _needs_preview_normalize(width: int, height: int) -> bool:
+    return width % _DIM_MULTIPLE != 0 or height % _DIM_MULTIPLE != 0
+
+
+def _remove_stale_timelines(draft_dir: Path) -> None:
+    timelines = draft_dir / "Timelines"
+    if timelines.is_dir():
+        shutil.rmtree(timelines, ignore_errors=True)
 
 
 def _gain_to_volume(gain_db: float) -> float:
@@ -699,5 +1011,7 @@ __all__ = [
     "EXPORTER_VERSION",
     "CapCutExportError",
     "CapCutExporter",
+    "capcut_canvas",
     "default_draft_dir",
+    "safe_media_filename",
 ]

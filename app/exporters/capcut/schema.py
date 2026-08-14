@@ -472,11 +472,16 @@ def draft_content(
     duration: float,
     materials: dict[str, list[dict[str, Any]]],
     tracks: list[dict[str, Any]],
+    ratio: str = "16:9",
 ) -> dict[str, Any]:
     """The timeline document.
 
     Every material bucket is present even when empty. CapCut reads several of them without
     checking, so an absent key is a crash on open rather than a graceful default.
+
+    ``ratio`` must be a CapCut preset label (``16:9``, ``9:16``, ``1:1``, ``4:5``). The value
+    ``original`` is deliberately avoided: CapCut's project UI treats preset ratios as the
+    supported set, and ``original`` has produced drafts that open with a broken preview.
     """
     buckets: dict[str, list[dict[str, Any]]] = {
         "audio_balances": [],
@@ -531,7 +536,7 @@ def draft_content(
         "name": name,
         "duration": to_microseconds(duration),
         "fps": fps,
-        "canvas_config": {"width": width, "height": height, "ratio": "original"},
+        "canvas_config": {"width": width, "height": height, "ratio": ratio},
         "materials": buckets,
         "tracks": tracks,
         "color_space": 0,

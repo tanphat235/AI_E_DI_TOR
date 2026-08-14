@@ -129,7 +129,9 @@ def build_container(
     # The prober is *injected*: an exporter that imports an analyser cannot be swapped out,
     # and would drag PyAV into anything that merely wants to write a project file.
     exporters = ExporterRegistry()
-    exporters.register(CapCutExporter(resolved_settings, prober=PyAvProber()))
+    exporters.register(
+        CapCutExporter(resolved_settings, prober=PyAvProber(), ffmpeg=locator)
+    )
 
     return Container(
         settings=resolved_settings,

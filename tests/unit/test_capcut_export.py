@@ -168,7 +168,29 @@ class TestDraftStructure:
         document = _export(_plan(output=output), project)
         assert document["canvas_config"]["width"] == 1920
         assert document["canvas_config"]["height"] == 1080
+        assert document["canvas_config"]["ratio"] == "16:9"
         assert document["fps"] == 30.0
+
+    def test_canvas_uses_capcut_preset_ratio_not_original(self, project: Path) -> None:
+        from app.models.common import AspectRatio
+
+        output = OutputSpec(
+            aspect_ratio=AspectRatio.VERTICAL, width=1080, height=1920, fps=30.0
+        )
+        document = _export(_plan(output=output), project)
+        assert document["canvas_config"]["ratio"] == "9:16"
+        assert document["canvas_config"]["width"] == 1080
+        assert document["canvas_config"]["height"] == 1920
+
+    def test_capcut_canvas_snaps_mismatched_pixels_to_aspect(self) -> None:
+        from app.exporters.capcut.exporter import capcut_canvas
+        from app.models.common import AspectRatio
+
+        width, height, ratio = capcut_canvas(
+            OutputSpec(aspect_ratio=AspectRatio.LANDSCAPE, width=1908, height=1032, fps=30.0)
+        )
+        assert ratio == "16:9"
+        assert (width, height) == (1920, 1080)
 
     def test_no_segment_references_a_material_that_does_not_exist(self, project: Path) -> None:
         """The one structural invariant that makes a draft loadable at all."""
@@ -462,17 +484,45 @@ class TestMedia:
         meta = json.loads((project / "draft" / schema.DRAFT_META_NAME).read_text(encoding="utf-8"))
         assert len(meta["draft_materials"][0]["value"]) == 2
 
-    def test_a_template_contributes_styling_but_not_a_timeline(self, project: Path) -> None:
-        """The timeline is the one thing being replaced; copying it would be self-defeating."""
+    def test_media_filenames_are_sanitised_for_capcut(self, project: Path) -> None:
+        """Spaces in paths have produced black-preview drafts CapCut still lists."""
+        awkward = project / "raw" / "bug slab.mp4"
+        awkward.write_bytes(b"present")
+        plan = _plan(
+            _clip("c1", source=MediaRef(path="raw/bug slab.mp4")),
+        )
+        _export(plan, project, copy_media=True)
+        assert (project / "draft" / "media" / "bug_slab.mp4").is_file()
+        assert not (project / "draft" / "media" / "bug slab.mp4").exists()
+
+    def test_template_does_not_copy_timelines(self, project: Path) -> None:
+        """A copied Timelines/ tree can open with a black player."""
         template = project / "template"
         template.mkdir()
         (template / schema.DRAFT_CONTENT_NAME).write_text('{"stale": true}', encoding="utf-8")
+        (template / "Timelines").mkdir()
+        (template / "Timelines" / "stale.json").write_text("{}", encoding="utf-8")
         (template / "extra_style.json").write_text("{}", encoding="utf-8")
 
         document = _export(_plan(), project, template=template)
         assert "stale" not in document
         assert (project / "draft" / "extra_style.json").is_file()
+        assert not (project / "draft" / "Timelines").exists()
 
+    def test_stale_timelines_are_removed_on_reexport(self, project: Path) -> None:
+        draft = project / "draft"
+        draft.mkdir()
+        stale = draft / "Timelines" / "old"
+        stale.mkdir(parents=True)
+        (stale / "x.json").write_text("{}", encoding="utf-8")
+        _export(_plan(), project)
+        assert not (draft / "Timelines").exists()
+
+    def test_safe_media_filename_collapses_spaces(self) -> None:
+        from app.exporters.capcut.exporter import safe_media_filename
+
+        assert safe_media_filename("bug slab.mp4") == "bug_slab.mp4"
+        assert safe_media_filename("001.mp4") == "001.mp4"
 
 # --------------------------------------------------------------------------- #
 # Preflight
