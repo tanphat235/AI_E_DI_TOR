@@ -19,6 +19,7 @@ import argparse
 import json
 import re
 import subprocess
+import sys
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,6 +32,17 @@ def _ffmpeg() -> Path:
         return Path(imageio_ffmpeg.get_ffmpeg_exe())
     except Exception as exc:  # noqa: BLE001
         raise SystemExit(f"ffmpeg not found via imageio-ffmpeg: {exc}") from exc
+
+
+def _media_duration(path: Path) -> float:
+    """Duration in seconds. PyAV, because the vendored wheel has no ffprobe."""
+    import av
+
+    with av.open(str(path)) as container:
+        if container.duration:
+            return float(container.duration) / 1_000_000.0
+        stream = container.streams.video[0]
+        return float(stream.duration * stream.time_base) if stream.duration else 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +59,19 @@ class Settings:
     badge: str = "SPEAKER"
     topic: str = "SHORT"
     title_fallback: str = "Short clip"
+    limit: int = 0
+    # "w:h:x:y" applied to the talk before framing, to drop baked-on
+    # decoration such as a pillarbox border or a scrolling promo banner.
+    src_crop: str = ""
+    # Read .aive/answer_segments.json instead of re-deriving chapters, so a
+    # purpose-built segmenter (see segment_qa.py) can own the cut points.
+    reuse_segments: bool = False
+    # Alternate segments JSON, for rendering a hand-picked span.
+    segments_file: Path | None = None
+    # Sequence many B-roll scenes under one clip rather than looping one.
+    broll_bed: bool = False
+    broll_chunk: float = 12.0
+    broll_stride: float = 47.0
 
 
 def build_segments(
@@ -145,6 +170,47 @@ def broll_files(broll_dir: Path) -> list[Path]:
     return files
 
 
+def build_bed(
+    files: list[Path],
+    bed: Path,
+    *,
+    ffmpeg: Path,
+    chunk: float,
+    out_w: int,
+    half_h: int,
+) -> Path:
+    """Concatenate every B-roll scene into one strip sized for the bottom half.
+
+    Looping a single 10s clip under a two-minute answer reads as obviously
+    automated. Encoding the strip once and reading a different offset per clip
+    gives each clip a changing bottom without re-encoding B-roll per clip.
+    """
+    if bed.is_file() and bed.stat().st_size > 100_000:
+        return bed
+    bed.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [str(ffmpeg), "-y"]
+    for f in files:
+        cmd += ["-t", f"{chunk:.3f}", "-i", str(f)]
+    parts = "".join(
+        f"[{i}:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
+        f"crop={out_w}:{half_h},fps=30,setsar=1[b{i}];"
+        for i in range(len(files))
+    )
+    joins = "".join(f"[b{i}]" for i in range(len(files)))
+    filt = f"{parts}{joins}concat=n={len(files)}:v=1:a=0[v]"
+    cmd += [
+        "-filter_complex", filt, "-map", "[v]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(bed),
+    ]
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr[-1200:] if proc.stderr else "bed build failed")
+    return bed
+
+
 def render_clip(
     seg: dict,
     *,
@@ -154,18 +220,25 @@ def render_clip(
     ffmpeg: Path,
     out_w: int,
     out_h: int,
+    src_crop: str = "",
+    bed_offset: float | None = None,
 ) -> Path:
     shorts_dir.mkdir(parents=True, exist_ok=True)
     out = shorts_dir / f"{seg['id']}.mp4"
     half_h = out_h // 2
     start, dur = seg["start"], seg["duration"]
+    pre = f"crop={src_crop}," if src_crop else ""
     filt = (
-        f"[0:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{half_h},fps=30[top];"
+        f"[0:v]{pre}scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
+        f"crop={out_w}:{half_h},fps=30,setsar=1[top];"
         f"[1:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{half_h},fps=30[bot];"
+        f"crop={out_w}:{half_h},fps=30,setsar=1[bot];"
         f"[top][bot]vstack=inputs=2[v]"
     )
+    bottom_in = ["-stream_loop", "-1"]
+    if bed_offset is not None:
+        bottom_in += ["-ss", f"{bed_offset:.3f}"]
+    bottom_in += ["-t", f"{dur:.3f}", "-i", str(broll)]
     cmd = [
         str(ffmpeg),
         "-y",
@@ -175,12 +248,7 @@ def render_clip(
         f"{dur:.3f}",
         "-i",
         str(source),
-        "-stream_loop",
-        "-1",
-        "-t",
-        f"{dur:.3f}",
-        "-i",
-        str(broll),
+        *bottom_in,
         "-filter_complex",
         filt,
         "-map",
@@ -291,37 +359,75 @@ def run(settings: Settings) -> int:
     cache = settings.work_dir / ".aive"
     shorts_dir = settings.work_dir / "output" / "shorts"
     transcript_path = cache / "transcript.json"
-    segments_path = cache / "answer_segments.json"
-    manifest_path = cache / "render_manifest.json"
+    segments_path = settings.segments_file or cache / "answer_segments.json"
+    # The manifest follows the segments list, so a one-off span rendered with
+    # --segments-file does not clobber the main run's manifest.
+    manifest_path = (
+        cache / f"render_manifest_{settings.segments_file.stem}.json"
+        if settings.segments_file is not None
+        else cache / "render_manifest.json"
+    )
 
-    if not transcript_path.is_file():
-        raise SystemExit(
-            f"missing transcript: {transcript_path}\n"
-            "Run scripts/shorts/transcribe.py first."
-        )
     if not settings.source.is_file():
         raise SystemExit(f"source not found: {settings.source}")
 
-    doc = json.loads(transcript_path.read_text(encoding="utf-8"))
-    segs = build_segments(
-        doc["segments"],
-        max_sec=settings.max_sec,
-        min_sec=settings.min_sec,
-        target_sec=settings.target_sec,
-        pause_cut=settings.pause_cut,
-        title_fallback=settings.title_fallback,
-    )
-    cache.mkdir(parents=True, exist_ok=True)
-    segments_path.write_text(json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8")
+    # --segments-file names a list to render, so it always reads and is never
+    # written back to. Deriving chapters would otherwise overwrite the caller's
+    # hand-picked spans.
+    if settings.reuse_segments or settings.segments_file is not None:
+        if not segments_path.is_file():
+            raise SystemExit(
+                f"missing segments: {segments_path}\n"
+                "Run scripts/shorts/segment_qa.py first, or drop --reuse-segments."
+            )
+        segs = json.loads(segments_path.read_text(encoding="utf-8"))
+    else:
+        if not transcript_path.is_file():
+            raise SystemExit(
+                f"missing transcript: {transcript_path}\n"
+                "Run scripts/shorts/transcribe.py first."
+            )
+        doc = json.loads(transcript_path.read_text(encoding="utf-8"))
+        segs = build_segments(
+            doc["segments"],
+            max_sec=settings.max_sec,
+            min_sec=settings.min_sec,
+            target_sec=settings.target_sec,
+            pause_cut=settings.pause_cut,
+            title_fallback=settings.title_fallback,
+        )
+        cache.mkdir(parents=True, exist_ok=True)
+        segments_path.write_text(
+            json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    if settings.limit:
+        segs = segs[: settings.limit]
     print(f"segments={len(segs)}")
     for s in segs[:8]:
         print(f"  {s['id']} {s['start']:.1f}-{s['end']:.1f} ({s['duration']:.1f}s) {s['title']}")
 
     brolls = broll_files(settings.broll_dir)
     ffmpeg = _ffmpeg()
+    bed: Path | None = None
+    bed_dur = 0.0
+    if settings.broll_bed:
+        bed = build_bed(
+            brolls,
+            cache / "broll_bed.mp4",
+            ffmpeg=ffmpeg,
+            chunk=settings.broll_chunk,
+            out_w=settings.out_w,
+            half_h=settings.out_h // 2,
+        )
+        bed_dur = _media_duration(bed)
+        print(f"broll bed: {bed.name} {bed_dur:.1f}s from {len(brolls)} scenes")
     rendered: list[dict] = []
     for i, seg in enumerate(segs):
         broll = brolls[i % len(brolls)]
+        offset: float | None = None
+        if bed is not None and bed_dur > 0:
+            broll = bed
+            offset = (i * settings.broll_stride) % bed_dur
         out_clip = shorts_dir / f"{seg['id']}.mp4"
         out_thumb = shorts_dir / f"{seg['id']}.jpg"
         print(f"[{i + 1}/{len(segs)}] render {seg['id']} + {broll.name}")
@@ -338,6 +444,8 @@ def run(settings: Settings) -> int:
                     ffmpeg=ffmpeg,
                     out_w=settings.out_w,
                     out_h=settings.out_h,
+                    src_crop=settings.src_crop,
+                    bed_offset=offset,
                 )
             if out_thumb.is_file() and out_thumb.stat().st_size > 1000:
                 thumb = out_thumb
@@ -361,6 +469,7 @@ def run(settings: Settings) -> int:
                     "clip": str(clip),
                     "thumb": str(thumb),
                     "broll": broll.name,
+                    "broll_offset": None if offset is None else round(offset, 2),
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -382,7 +491,37 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--badge", default="SPEAKER", help="Top badge on thumbnail.")
     parser.add_argument("--topic", default="SHORT", help="Bottom topic label on thumbnail.")
     parser.add_argument("--title-fallback", default="Short clip")
+    parser.add_argument(
+        "--src-crop",
+        default="",
+        help='"w:h:x:y" crop on the talk, to drop a pillarbox or promo banner.',
+    )
+    parser.add_argument(
+        "--reuse-segments",
+        action="store_true",
+        help="Use .aive/answer_segments.json as-is (see segment_qa.py).",
+    )
+    parser.add_argument(
+        "--segments-file",
+        type=Path,
+        default=None,
+        help="Segments JSON to render instead of .aive/answer_segments.json.",
+    )
+    parser.add_argument(
+        "--broll-bed",
+        action="store_true",
+        help="Sequence every B-roll scene into one strip instead of looping one clip.",
+    )
+    parser.add_argument("--broll-chunk", type=float, default=12.0,
+                        help="Seconds taken from each B-roll scene for the strip.")
+    parser.add_argument("--broll-stride", type=float, default=47.0,
+                        help="Seconds of strip offset between consecutive clips.")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Render only the first N clips, to preview framing.")
     args = parser.parse_args(argv)
+
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     settings = Settings(
         source=args.source,
@@ -394,6 +533,13 @@ def main(argv: list[str] | None = None) -> int:
         badge=args.badge,
         topic=args.topic,
         title_fallback=args.title_fallback,
+        limit=args.limit,
+        src_crop=args.src_crop,
+        reuse_segments=args.reuse_segments,
+        segments_file=args.segments_file,
+        broll_bed=args.broll_bed,
+        broll_chunk=args.broll_chunk,
+        broll_stride=args.broll_stride,
     )
     return run(settings)
 
