@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import re
 import subprocess
 import sys
@@ -72,6 +73,16 @@ class Settings:
     broll_bed: bool = False
     broll_chunk: float = 12.0
     broll_stride: float = 47.0
+    # Shuffle the B-roll order with this seed; 0 keeps them sorted by name.
+    broll_seed: int = 0
+    # How per-clip strip offsets are chosen. "stride" steps by broll_stride and
+    # repeats whenever the strip length is near a multiple of it -- a 329.5s strip
+    # with stride 47 gave only 8 distinct offsets. "golden" walks by the golden
+    # ratio, which spreads any number of clips without tuning the stride.
+    broll_spread: str = "stride"
+    # Continue the offset sequence from here, so a second render pass over the
+    # same project does not restart at 0 and duplicate the first pass.
+    broll_start_index: int = 0
 
 
 def build_segments(
@@ -92,8 +103,10 @@ def build_segments(
     for s in segments[1:]:
         gap = s["start"] - cur[-1]["end"]
         dur = s["end"] - cur[0]["start"]
-        if dur >= max_sec or (dur >= target_sec and gap >= pause_cut) or (
-            dur >= min_sec and gap >= 2.5
+        if (
+            dur >= max_sec
+            or (dur >= target_sec and gap >= pause_cut)
+            or (dur >= min_sec and gap >= 2.5)
         ):
             chapters.append(cur)
             cur = [s]
@@ -199,13 +212,24 @@ def build_bed(
     joins = "".join(f"[b{i}]" for i in range(len(files)))
     filt = f"{parts}{joins}concat=n={len(files)}:v=1:a=0[v]"
     cmd += [
-        "-filter_complex", filt, "-map", "[v]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
-        "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart", str(bed),
+        "-filter_complex",
+        filt,
+        "-map",
+        "[v]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "22",
+        "-pix_fmt",
+        "yuv420p",
+        "-an",
+        "-movflags",
+        "+faststart",
+        str(bed),
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr[-1200:] if proc.stderr else "bed build failed")
     return bed
@@ -255,9 +279,12 @@ def render_clip(
     cmd = [str(ffmpeg), "-y"]
     for p in parts:
         cmd += [
-            "-ss", f"{p['start']:.3f}",
-            "-t", f"{p['end'] - p['start']:.3f}",
-            "-i", str(source),
+            "-ss",
+            f"{p['start']:.3f}",
+            "-t",
+            f"{p['end'] - p['start']:.3f}",
+            "-i",
+            str(source),
         ]
     cmd += ["-stream_loop", "-1"]
     if bed_offset is not None:
@@ -285,9 +312,7 @@ def render_clip(
         "+faststart",
         str(out),
     ]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr[-800:] if proc.stderr else "ffmpeg failed")
     return out
@@ -399,8 +424,7 @@ def run(settings: Settings) -> int:
     else:
         if not transcript_path.is_file():
             raise SystemExit(
-                f"missing transcript: {transcript_path}\n"
-                "Run scripts/shorts/transcribe.py first."
+                f"missing transcript: {transcript_path}\nRun scripts/shorts/transcribe.py first."
             )
         doc = json.loads(transcript_path.read_text(encoding="utf-8"))
         segs = build_segments(
@@ -412,9 +436,7 @@ def run(settings: Settings) -> int:
             title_fallback=settings.title_fallback,
         )
         cache.mkdir(parents=True, exist_ok=True)
-        segments_path.write_text(
-            json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        segments_path.write_text(json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8")
     if settings.limit:
         segs = segs[: settings.limit]
     print(f"segments={len(segs)}")
@@ -426,9 +448,16 @@ def run(settings: Settings) -> int:
     bed: Path | None = None
     bed_dur = 0.0
     if settings.broll_bed:
+        if settings.broll_seed:
+            random.Random(settings.broll_seed).shuffle(brolls)
+        # The seed is part of the name so a different order rebuilds the strip
+        # instead of silently reusing the cached one.
+        bed_name = (
+            f"broll_bed_s{settings.broll_seed}.mp4" if settings.broll_seed else "broll_bed.mp4"
+        )
         bed = build_bed(
             brolls,
-            cache / "broll_bed.mp4",
+            cache / bed_name,
             ffmpeg=ffmpeg,
             chunk=settings.broll_chunk,
             out_w=settings.out_w,
@@ -442,7 +471,11 @@ def run(settings: Settings) -> int:
         offset: float | None = None
         if bed is not None and bed_dur > 0:
             broll = bed
-            offset = (i * settings.broll_stride) % bed_dur
+            idx = i + settings.broll_start_index
+            if settings.broll_spread == "golden":
+                offset = ((idx * 0.6180339887498949) % 1.0) * bed_dur
+            else:
+                offset = (idx * settings.broll_stride) % bed_dur
         out_clip = shorts_dir / f"{seg['id']}.mp4"
         out_thumb = shorts_dir / f"{seg['id']}.jpg"
         print(f"[{i + 1}/{len(segs)}] render {seg['id']} + {broll.name}")
@@ -527,12 +560,39 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Sequence every B-roll scene into one strip instead of looping one clip.",
     )
-    parser.add_argument("--broll-chunk", type=float, default=12.0,
-                        help="Seconds taken from each B-roll scene for the strip.")
-    parser.add_argument("--broll-stride", type=float, default=47.0,
-                        help="Seconds of strip offset between consecutive clips.")
-    parser.add_argument("--limit", type=int, default=0,
-                        help="Render only the first N clips, to preview framing.")
+    parser.add_argument(
+        "--broll-chunk",
+        type=float,
+        default=12.0,
+        help="Seconds taken from each B-roll scene for the strip.",
+    )
+    parser.add_argument(
+        "--broll-stride",
+        type=float,
+        default=47.0,
+        help="Seconds of strip offset between consecutive clips.",
+    )
+    parser.add_argument(
+        "--broll-seed",
+        type=int,
+        default=0,
+        help="Shuffle B-roll order with this seed (0 = sorted).",
+    )
+    parser.add_argument(
+        "--broll-spread",
+        choices=("stride", "golden"),
+        default="stride",
+        help="How to space strip offsets across clips.",
+    )
+    parser.add_argument(
+        "--broll-start-index",
+        type=int,
+        default=0,
+        help="Continue the offset sequence from this clip index.",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=0, help="Render only the first N clips, to preview framing."
+    )
     args = parser.parse_args(argv)
 
     if hasattr(sys.stdout, "reconfigure"):
@@ -555,6 +615,9 @@ def main(argv: list[str] | None = None) -> int:
         broll_bed=args.broll_bed,
         broll_chunk=args.broll_chunk,
         broll_stride=args.broll_stride,
+        broll_seed=args.broll_seed,
+        broll_spread=args.broll_spread,
+        broll_start_index=args.broll_start_index,
     )
     return run(settings)
 

@@ -182,6 +182,14 @@ def main(argv: list[str] | None = None) -> int:
     picked.sort()
     if not picked:
         raise SystemExit(f"no occurrence scored >= {args.threshold}")
+    if len(picked) < 2:
+        # A channel insert is pasted in repeatedly; a template matching only
+        # itself is a one-off sound, and calling it a sting would drop good
+        # audio. Emit nothing rather than a bogus span.
+        raise SystemExit(
+            f"template matches only itself at {picked[0] / sr:.2f}s, so it does "
+            "not repeat and is not an inserted sting; nothing written"
+        )
 
     seed = picked[int(np.argmax([ncc[p] for p in picked]))]
     others = [p for p in picked if p != seed]

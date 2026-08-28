@@ -25,6 +25,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import re
 import subprocess
@@ -139,6 +140,40 @@ def detect_silences(wav: Path, ffmpeg: Path, *, noise_db: float, min_dur: float)
     if not starts:
         raise SystemExit("silencedetect found no silence; check the audio file")
     return [Silence(a, b) for a, b in zip(starts, ends, strict=False)]
+
+
+def detect_pauses_vad(wav: Path, *, threshold: float, min_pause: float) -> list[Silence]:
+    """Pauses as the gaps between Silero VAD speech chunks.
+
+    An energy gate needs a level that suits the recording: on one outdoor talk
+    ``silencedetect`` returned nothing at any threshold from -30dB to -18dB
+    because the crowd never stayed below them for a full 0.45s, and on another
+    the count swung from 2 to 955 between -30dB and -21dB. VAD scores speech
+    probability instead, so it needs no such tuning.
+    """
+    import wave
+
+    import numpy as np
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    with wave.open(str(wav)) as handle:
+        sr = handle.getframerate()
+        raw = handle.readframes(handle.getnframes())
+    audio = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    chunks = get_speech_timestamps(
+        audio,
+        VadOptions(
+            threshold=threshold,
+            min_speech_duration_ms=200,
+            min_silence_duration_ms=int(min_pause * 1000),
+            speech_pad_ms=0,
+        ),
+        sampling_rate=sr,
+    )
+    spans = [(c["start"] / sr, c["end"] / sr) for c in chunks]
+    if not spans:
+        raise SystemExit("VAD found no speech; check the audio file")
+    return [Silence(a[1], b[0]) for a, b in itertools.pairwise(spans) if b[0] > a[1]]
 
 
 def _text_between(segments: list[dict], start: float, end: float) -> str:
@@ -311,6 +346,13 @@ def main(argv: list[str] | None = None) -> int:
         default=1.5,
         help="Shortest silence allowed to end a clip.",
     )
+    parser.add_argument(
+        "--pauses",
+        choices=("silence", "vad"),
+        default="silence",
+        help="Where pauses come from: an energy gate, or Silero VAD.",
+    )
+    parser.add_argument("--vad-threshold", type=float, default=0.5)
     parser.add_argument("--noise-db", type=float, default=-30.0)
     parser.add_argument("--min-silence", type=float, default=0.45)
     parser.add_argument("--title-fallback", default="Phap thoai")
@@ -332,10 +374,20 @@ def main(argv: list[str] | None = None) -> int:
     if doc.get("partial"):
         raise SystemExit("transcript is still partial; wait for transcribe.py")
 
-    sting_path = cache / "stings.json"
-    stings = json.loads(sting_path.read_text(encoding="utf-8")) if sting_path.is_file() else []
+    # Spans to drop, each forcing a boundary: auto-detected channel inserts
+    # (stings.json) plus anything hand-authored (breaks.json), such as the
+    # dissolve where two separate talks were concatenated into one upload.
+    stings: list[dict] = []
+    for name in ("stings.json", "breaks.json"):
+        path = cache / name
+        if path.is_file():
+            stings.extend(json.loads(path.read_text(encoding="utf-8")))
+    stings.sort(key=lambda x: x["start"])
 
-    sil = detect_silences(wav, _ffmpeg(), noise_db=args.noise_db, min_dur=args.min_silence)
+    if args.pauses == "vad":
+        sil = detect_pauses_vad(wav, threshold=args.vad_threshold, min_pause=args.min_silence)
+    else:
+        sil = detect_silences(wav, _ffmpeg(), noise_db=args.noise_db, min_dur=args.min_silence)
     (cache / "silences.json").write_text(
         json.dumps(
             [{"start": s.start, "end": s.end, "duration": round(s.duration, 3)} for s in sil],
