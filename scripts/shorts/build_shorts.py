@@ -226,35 +226,50 @@ def render_clip(
     shorts_dir.mkdir(parents=True, exist_ok=True)
     out = shorts_dir / f"{seg['id']}.mp4"
     half_h = out_h // 2
-    start, dur = seg["start"], seg["duration"]
+    # A segment is either one span, or a "parts" list spliced in the order given
+    # -- which need not be chronological.
+    parts = seg.get("parts") or [{"start": seg["start"], "end": seg["end"]}]
+    dur = sum(p["end"] - p["start"] for p in parts)
     pre = f"crop={src_crop}," if src_crop else ""
+
+    top_chain = "".join(
+        f"[{i}:v]{pre}scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
+        f"crop={out_w}:{half_h},fps=30,setsar=1[p{i}];"
+        for i in range(len(parts))
+    )
+    if len(parts) == 1:
+        joined = "[p0]null[top];"
+        audio_map = "0:a"
+    else:
+        pairs = "".join(f"[p{i}][{i}:a]" for i in range(len(parts)))
+        joined = f"{pairs}concat=n={len(parts)}:v=1:a=1[top][aout];"
+        audio_map = "[aout]"
+    bed_idx = len(parts)
     filt = (
-        f"[0:v]{pre}scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{half_h},fps=30,setsar=1[top];"
-        f"[1:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
+        f"{top_chain}{joined}"
+        f"[{bed_idx}:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
         f"crop={out_w}:{half_h},fps=30,setsar=1[bot];"
         f"[top][bot]vstack=inputs=2[v]"
     )
-    bottom_in = ["-stream_loop", "-1"]
+
+    cmd = [str(ffmpeg), "-y"]
+    for p in parts:
+        cmd += [
+            "-ss", f"{p['start']:.3f}",
+            "-t", f"{p['end'] - p['start']:.3f}",
+            "-i", str(source),
+        ]
+    cmd += ["-stream_loop", "-1"]
     if bed_offset is not None:
-        bottom_in += ["-ss", f"{bed_offset:.3f}"]
-    bottom_in += ["-t", f"{dur:.3f}", "-i", str(broll)]
-    cmd = [
-        str(ffmpeg),
-        "-y",
-        "-ss",
-        f"{start:.3f}",
-        "-t",
-        f"{dur:.3f}",
-        "-i",
-        str(source),
-        *bottom_in,
+        cmd += ["-ss", f"{bed_offset:.3f}"]
+    cmd += ["-t", f"{dur:.3f}", "-i", str(broll)]
+    cmd += [
         "-filter_complex",
         filt,
         "-map",
         "[v]",
         "-map",
-        "0:a",
+        audio_map,
         "-c:v",
         "libx264",
         "-preset",

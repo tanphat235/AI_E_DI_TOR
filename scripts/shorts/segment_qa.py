@@ -10,6 +10,13 @@ A clip therefore ends only at a real pause. When a topic block runs past
 ``--max-sec`` it is cut at the best available pause rather than chopped at a
 fixed offset, so no clip ever ends in the middle of a sentence.
 
+If ``.aive/stings.json`` exists (see ``find_stings.py``) every transition sting
+another channel inserted becomes a mandatory boundary and its own span is
+dropped. That matters twice over: the insert is as loud as speech, so silence
+detection never flags it and the packer would otherwise cut straight into it;
+and the insert sits exactly where the next question begins, so honouring it is
+what stops a clip from carrying half of one answer and half of the next.
+
 Example:
   .\\.venv\\Scripts\\python.exe scripts\\shorts\\segment_qa.py ^
     --work-dir projects\\myjob --target-sec 120
@@ -170,43 +177,41 @@ def _cut_in(sil: Silence) -> float:
     return sil.end - min(0.35, sil.duration * 0.3)
 
 
-def build_segments(
-    silences: list[Silence],
-    segments: list[dict],
+def _pack_block(
+    lo: float,
+    hi: float,
+    scored: list[tuple[Silence, float]],
     *,
-    duration: float,
     min_sec: float,
     target_sec: float,
     max_sec: float,
-    min_boundary: float,
-    title_fallback: str,
-) -> list[dict]:
-    cands = [s for s in silences if s.duration >= min_boundary]
-    if not cands:
-        raise SystemExit(f"no silence >= {min_boundary}s; lower --min-boundary")
-    scored = [(s, score_boundary(s, segments)) for s in cands]
-
-    start_at = _cut_in(silences[0]) if silences[0].start <= 0.05 else 0.0
+) -> list[tuple[float, float]]:
+    """Split one question into clips at silences, never at a fixed offset."""
+    inner = [(s, sc) for s, sc in scored if lo + min_sec <= _cut_out(s) and _cut_in(s) <= hi]
     blocks: list[tuple[float, float]] = []
-    cur = max(0.0, start_at)
+    cur = lo
     used = 0
-    while used < len(scored):
+    while used < len(inner):
+        if hi - cur <= max_sec:
+            break  # what is left already fits; no need to cut again
         window = [
             (i, s, sc)
-            for i, (s, sc) in enumerate(scored[used:], start=used)
+            for i, (s, sc) in enumerate(inner[used:], start=used)
             if min_sec <= _cut_out(s) - cur <= max_sec
         ]
         if window:
             best = max(
                 window,
-                key=lambda t: t[2] - abs((_cut_out(t[1]) - cur) - target_sec) / target_sec * 4.0,
+                key=lambda t, at=cur: (
+                    t[2] - abs((_cut_out(t[1]) - at) - target_sec) / target_sec * 4.0
+                ),
             )
         else:
             # Nothing inside the window: take the first pause past min_sec
             # rather than chopping mid-sentence at max_sec.
             beyond = [
                 (i, s, sc)
-                for i, (s, sc) in enumerate(scored[used:], start=used)
+                for i, (s, sc) in enumerate(inner[used:], start=used)
                 if _cut_out(s) - cur >= min_sec
             ]
             if not beyond:
@@ -217,10 +222,50 @@ def build_segments(
         cur = _cut_in(sil)
         used = idx + 1
 
-    if duration - cur >= min_sec:
-        blocks.append((cur, duration))
+    if hi - cur > 0.5:
+        blocks.append((cur, hi))
     elif blocks:
-        blocks[-1] = (blocks[-1][0], duration)
+        blocks[-1] = (blocks[-1][0], hi)
+    return blocks
+
+
+def build_segments(
+    silences: list[Silence],
+    segments: list[dict],
+    *,
+    duration: float,
+    min_sec: float,
+    target_sec: float,
+    max_sec: float,
+    min_boundary: float,
+    title_fallback: str,
+    stings: list[dict] | None = None,
+) -> list[dict]:
+    cands = [s for s in silences if s.duration >= min_boundary]
+    if not cands:
+        raise SystemExit(f"no silence >= {min_boundary}s; lower --min-boundary")
+    scored = [(s, score_boundary(s, segments)) for s in cands]
+
+    start_at = _cut_in(silences[0]) if silences[0].start <= 0.05 else 0.0
+
+    # A transition sting marks where the next question begins, so it is a
+    # mandatory boundary and its own span is dropped. Without this the packer
+    # cuts by duration alone and lands mid-question -- or inside the sting,
+    # which is loud enough that silence detection never flags it.
+    questions: list[tuple[float, float]] = []
+    cur = max(0.0, start_at)
+    for sting in sorted(stings or [], key=lambda s: s["start"]):
+        if sting["cut_before"] > cur + 0.5:
+            questions.append((cur, sting["cut_before"]))
+        cur = sting["cut_after"]
+    if duration - cur > 0.5:
+        questions.append((cur, duration))
+
+    blocks: list[tuple[float, float]] = []
+    for lo, hi in questions:
+        blocks.extend(
+            _pack_block(lo, hi, scored, min_sec=min_sec, target_sec=target_sec, max_sec=max_sec)
+        )
 
     out: list[dict] = []
     for i, (a, b) in enumerate(blocks, start=1):
@@ -287,6 +332,9 @@ def main(argv: list[str] | None = None) -> int:
     if doc.get("partial"):
         raise SystemExit("transcript is still partial; wait for transcribe.py")
 
+    sting_path = cache / "stings.json"
+    stings = json.loads(sting_path.read_text(encoding="utf-8")) if sting_path.is_file() else []
+
     sil = detect_silences(wav, _ffmpeg(), noise_db=args.noise_db, min_dur=args.min_silence)
     (cache / "silences.json").write_text(
         json.dumps(
@@ -304,6 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         max_sec=args.max_sec,
         min_boundary=args.min_boundary,
         title_fallback=args.title_fallback,
+        stings=stings,
     )
     out = cache / "answer_segments.json"
     out.write_text(json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8")
