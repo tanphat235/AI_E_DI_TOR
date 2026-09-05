@@ -35,6 +35,16 @@ def _ffmpeg() -> Path:
         raise SystemExit(f"ffmpeg not found via imageio-ffmpeg: {exc}") from exc
 
 
+def _music_offset_for(index: int, settings: "Settings", music_dur: float) -> float:
+    """Where in the track this clip's bed starts."""
+    if music_dur <= 0:
+        return 0.0
+    if settings.music_offset >= 0:
+        return settings.music_offset % music_dur
+    idx = index + settings.broll_start_index
+    return ((idx * 0.6180339887498949) % 1.0) * music_dur
+
+
 def _media_duration(path: Path) -> float:
     """Duration in seconds. PyAV, because the vendored wheel has no ffprobe."""
     import av
@@ -83,6 +93,23 @@ class Settings:
     # Continue the offset sequence from here, so a second render pass over the
     # same project does not restart at 0 and duplicate the first pass.
     broll_start_index: int = 0
+    # "top" mirrors the talk only, "all" the finished frame, "none" neither.
+    flip: str = "none"
+    # Optional instrumental bed, ducked under the speech.
+    music: Path | None = None
+    music_db: float = -26.0
+    music_fade: float = 1.5
+    # Pin the bed to one chosen stretch of the track. Negative = spread each
+    # clip's offset across the track automatically.
+    music_offset: float = -1.0
+    # Sidechain ducking makes the bed rise and fall with the speech, which is
+    # audible as pumping. Off holds one constant level for the whole clip.
+    # Threshold is linear amplitude: speech sits near 0.08 and room tone near
+    # 0.003, so a value between the two engages under speech only.
+    music_duck: bool = True
+    music_duck_threshold: float = 0.01
+    music_duck_ratio: float = 12.0
+    music_duck_release: float = 300.0
 
 
 def build_segments(
@@ -246,6 +273,15 @@ def render_clip(
     out_h: int,
     src_crop: str = "",
     bed_offset: float | None = None,
+    flip: str = "none",
+    music: Path | None = None,
+    music_db: float = -26.0,
+    music_offset: float = 0.0,
+    music_fade: float = 1.5,
+    duck: bool = True,
+    duck_threshold: float = 0.01,
+    duck_ratio: float = 12.0,
+    duck_release: float = 300.0,
 ) -> Path:
     shorts_dir.mkdir(parents=True, exist_ok=True)
     out = shorts_dir / f"{seg['id']}.mp4"
@@ -256,24 +292,61 @@ def render_clip(
     dur = sum(p["end"] - p["start"] for p in parts)
     pre = f"crop={src_crop}," if src_crop else ""
 
+    # "top" mirrors only the talk, so a speaker facing left now faces right;
+    # "all" mirrors the finished frame, B-roll included.
+    top_flip = "hflip," if flip == "top" else ""
+    out_flip = ",hflip" if flip == "all" else ""
+
     top_chain = "".join(
         f"[{i}:v]{pre}scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{half_h},fps=30,setsar=1[p{i}];"
+        f"crop={out_w}:{half_h},{top_flip}fps=30,setsar=1[p{i}];"
         for i in range(len(parts))
     )
     if len(parts) == 1:
-        joined = "[p0]null[top];"
-        audio_map = "0:a"
+        joined = "[p0]null[top];[0:a]anull[speech];"
     else:
         pairs = "".join(f"[p{i}][{i}:a]" for i in range(len(parts)))
-        joined = f"{pairs}concat=n={len(parts)}:v=1:a=1[top][aout];"
-        audio_map = "[aout]"
+        joined = f"{pairs}concat=n={len(parts)}:v=1:a=1[top][speech];"
     bed_idx = len(parts)
+
+    if music is None:
+        audio_chain = ""
+        audio_map = "[speech]"
+    else:
+        # The music is mastered far hotter than the talk (-9.6 LUFS against
+        # -21.7 on this source), so it is cut right down and then ducked
+        # against the speech itself -- otherwise it buries the teaching.
+        fade_out = max(0.0, dur - music_fade)
+        fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+        music_chain = (
+            f"[{bed_idx + 1}:a]{fmt},volume={music_db}dB,"
+            f"afade=t=in:st=0:d={music_fade},"
+            f"afade=t=out:st={fade_out:.3f}:d={music_fade}[mus];"
+        )
+        if duck:
+            audio_chain = (
+                f"[speech]{fmt},asplit=2[sp][sc];"
+                f"{music_chain}"
+                f"[mus][sc]sidechaincompress="
+                f"threshold={duck_threshold}:ratio={duck_ratio}:"
+                f"attack=5:release={duck_release}[musd];"
+                f"[sp][musd]amix=inputs=2:duration=first:normalize=0[aout];"
+            )
+        else:
+            # One constant level. Only the entrance and exit fades change it.
+            audio_chain = (
+                f"[speech]{fmt}[sp];"
+                f"{music_chain}"
+                f"[sp][mus]amix=inputs=2:duration=first:normalize=0[aout];"
+            )
+        audio_map = "[aout]"
+
     filt = (
         f"{top_chain}{joined}"
         f"[{bed_idx}:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
         f"crop={out_w}:{half_h},fps=30,setsar=1[bot];"
-        f"[top][bot]vstack=inputs=2[v]"
+        f"{audio_chain}"
+        f"[top][bot]vstack=inputs=2{out_flip}[v]"
     )
 
     cmd = [str(ffmpeg), "-y"]
@@ -290,6 +363,17 @@ def render_clip(
     if bed_offset is not None:
         cmd += ["-ss", f"{bed_offset:.3f}"]
     cmd += ["-t", f"{dur:.3f}", "-i", str(broll)]
+    if music is not None:
+        cmd += [
+            "-stream_loop",
+            "-1",
+            "-ss",
+            f"{music_offset:.3f}",
+            "-t",
+            f"{dur:.3f}",
+            "-i",
+            str(music),
+        ]
     cmd += [
         "-filter_complex",
         filt,
@@ -465,6 +549,13 @@ def run(settings: Settings) -> int:
         )
         bed_dur = _media_duration(bed)
         print(f"broll bed: {bed.name} {bed_dur:.1f}s from {len(brolls)} scenes")
+    music_dur = 0.0
+    if settings.music is not None:
+        if not settings.music.is_file():
+            raise SystemExit(f"music not found: {settings.music}")
+        music_dur = _media_duration(settings.music)
+        how = "ducked" if settings.music_duck else "constant level"
+        print(f"music: {settings.music.name} {music_dur:.0f}s at {settings.music_db}dB, {how}")
     rendered: list[dict] = []
     for i, seg in enumerate(segs):
         broll = brolls[i % len(brolls)]
@@ -494,6 +585,15 @@ def run(settings: Settings) -> int:
                     out_h=settings.out_h,
                     src_crop=settings.src_crop,
                     bed_offset=offset,
+                    flip=settings.flip,
+                    music=settings.music,
+                    music_db=settings.music_db,
+                    music_offset=_music_offset_for(i, settings, music_dur),
+                    music_fade=settings.music_fade,
+                    duck=settings.music_duck,
+                    duck_threshold=settings.music_duck_threshold,
+                    duck_ratio=settings.music_duck_ratio,
+                    duck_release=settings.music_duck_release,
                 )
             if out_thumb.is_file() and out_thumb.stat().st_size > 1000:
                 thumb = out_thumb
@@ -579,6 +679,44 @@ def main(argv: list[str] | None = None) -> int:
         help="Shuffle B-roll order with this seed (0 = sorted).",
     )
     parser.add_argument(
+        "--flip",
+        choices=("none", "top", "all"),
+        default="none",
+        help="Mirror horizontally: the talk only, the whole frame, or neither.",
+    )
+    parser.add_argument(
+        "--music", type=Path, default=None, help="Instrumental track to lay under the talk."
+    )
+    parser.add_argument(
+        "--music-db", type=float, default=-26.0, help="Resting music gain in dB before ducking."
+    )
+    parser.add_argument("--music-fade", type=float, default=1.5, help="Music fade in/out seconds.")
+    parser.add_argument(
+        "--music-offset",
+        type=float,
+        default=-1.0,
+        help="Start the bed at this second of the track; negative spreads it per clip.",
+    )
+    parser.add_argument(
+        "--music-duck",
+        choices=("on", "off"),
+        default="on",
+        help="Sidechain ducking. 'off' holds one constant music level.",
+    )
+    parser.add_argument(
+        "--music-duck-threshold",
+        type=float,
+        default=0.01,
+        help="Sidechain threshold (linear amplitude of the speech).",
+    )
+    parser.add_argument("--music-duck-ratio", type=float, default=12.0)
+    parser.add_argument(
+        "--music-duck-release",
+        type=float,
+        default=300.0,
+        help="Ducking release in ms; shorter lets music breathe in pauses.",
+    )
+    parser.add_argument(
         "--broll-spread",
         choices=("stride", "golden"),
         default="stride",
@@ -618,6 +756,15 @@ def main(argv: list[str] | None = None) -> int:
         broll_seed=args.broll_seed,
         broll_spread=args.broll_spread,
         broll_start_index=args.broll_start_index,
+        flip=args.flip,
+        music=args.music,
+        music_db=args.music_db,
+        music_fade=args.music_fade,
+        music_offset=args.music_offset,
+        music_duck=args.music_duck == "on",
+        music_duck_threshold=args.music_duck_threshold,
+        music_duck_ratio=args.music_duck_ratio,
+        music_duck_release=args.music_duck_release,
     )
     return run(settings)
 
