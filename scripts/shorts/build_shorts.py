@@ -1,6 +1,10 @@
 """Build vertical split-screen shorts from a talk video + B-roll folder.
 
-Layout: top = talk video, bottom = B-roll. Audio from talk only.
+Two layouts. "half" is the original: top = talk, bottom = B-roll. "center"
+puts the talk in the middle of a full-frame scene background, with a title
+above it and a caption of the speech below it, styled to match
+projects/tui-tu-tui-nhan/shorts/clip_001.mp4 -- see layout_center.py, which
+owns that geometry and the measurements behind it.
 Writes paired files into <work-dir>/output/shorts/:
   clip_001.mp4 + clip_001.jpg
 
@@ -25,6 +29,10 @@ import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import layout_center as lc  # noqa: E402  (needs the path above)
+
 
 def _ffmpeg() -> Path:
     try:
@@ -43,6 +51,31 @@ def _music_offset_for(index: int, settings: "Settings", music_dur: float) -> flo
         return settings.music_offset % music_dur
     idx = index + settings.broll_start_index
     return ((idx * 0.6180339887498949) % 1.0) * music_dur
+
+
+def _video_size(path: Path) -> tuple[int, int]:
+    """Coded width and height. PyAV, because the vendored wheel has no ffprobe."""
+    import av
+
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        return int(stream.codec_context.width), int(stream.codec_context.height)
+
+
+def _talk_height(source: Path, src_crop: str, out_w: int) -> int:
+    """Height the talk occupies at full width, from its own aspect ratio.
+
+    Taken from --src-crop when given, because that crop is what will actually
+    be shown; falling back to the coded size would letterbox or stretch a clip
+    whose furniture has been cropped away. Rounded to an even number, which
+    yuv420p requires.
+    """
+    if src_crop:
+        parts = src_crop.split(":")
+        w, h = int(parts[0]), int(parts[1])
+    else:
+        w, h = _video_size(source)
+    return max(2, int(round(out_w * h / w)) // 2 * 2)
 
 
 def _media_duration(path: Path) -> float:
@@ -93,6 +126,40 @@ class Settings:
     # Continue the offset sequence from here, so a second render pass over the
     # same project does not restart at 0 and duplicate the first pass.
     broll_start_index: int = 0
+    # "half" stacks talk over B-roll. "center" frames the talk inside a
+    # full-frame scene background with title above and caption below.
+    layout: str = "half"
+    # Height of the talk inside the centre layout; 0 derives it from the
+    # source's own aspect after --src-crop, so nothing is stretched.
+    talk_h: int = 0
+    # Draw a caption of the speech under the talk (centre layout only). Needs
+    # .aive/transcript.json, which transcribe.py writes.
+    captions: bool = True
+    centre_font: Path = Path(r"C:/Windows/Fonts/seguibl.ttf")
+    title_size: int = 78
+    title_max_lines: int = 2
+    caption_size: int = 54
+    caption_max_lines: int = 2
+    # Clean up the talk's own audio: rumble out, low-mid mud down, consonant
+    # band up, gentle levelling. Off by default so finished projects are
+    # unaffected.
+    voice_clarity: bool = False
+    # Resample ratio for the talk's pitch, tempo restored afterwards so the
+    # duration does not change. 0.95 is five percent deeper.
+    voice_pitch: float = 1.0
+    # Hold the bed at one level and move it out of the voice's band. Both are
+    # what the approved reference does; both default off.
+    music_compress: bool = False
+    music_dip_hz: float = 450.0
+    music_dip_db: float = 0.0
+    # "flattest" pins each clip's bed to the steadiest stretch of the track of
+    # that clip's own length, instead of spreading offsets across it. Costs one
+    # decode of the whole track, cached.
+    music_window: str = "fixed"
+    # Aim the bed this many dB under the measured speech, instead of asking
+    # for a raw --music-db. Zero keeps the raw-gain behaviour the finished
+    # projects were tuned with.
+    music_under_db: float = 0.0
     # "top" mirrors the talk only, "all" the finished frame, "none" neither.
     flip: str = "none"
     # Optional instrumental bed, ducked under the speech.
@@ -102,6 +169,13 @@ class Settings:
     # Pin the bed to one chosen stretch of the track. Negative = spread each
     # clip's offset across the track automatically.
     music_offset: float = -1.0
+    # Thumbnail headline. The text itself is written per clip into the segment
+    # as "thumb_text"; these control how it is drawn.
+    thumb_font: Path = Path(r"C:/Windows/Fonts/arialbd.ttf")
+    thumb_color: str = "0xFFD24A"
+    thumb_size: int = 84
+    thumb_lines: int = 3
+    thumb_margin: int = 150
     # Sidechain ducking makes the bed rise and fall with the speech, which is
     # audible as pumping. Off holds one constant level for the whole clip.
     # Threshold is linear amplitude: speech sits near 0.08 and room tone near
@@ -219,7 +293,7 @@ def build_bed(
     out_w: int,
     half_h: int,
 ) -> Path:
-    """Concatenate every B-roll scene into one strip sized for the bottom half.
+    """Concatenate every B-roll scene into one strip of the given height.
 
     Looping a single 10s clip under a two-minute answer reads as obviously
     automated. Encoding the strip once and reading a different offset per clip
@@ -274,6 +348,17 @@ def render_clip(
     src_crop: str = "",
     bed_offset: float | None = None,
     flip: str = "none",
+    layout: str = "half",
+    geom: lc.Geometry | None = None,
+    style: lc.CentreStyle | None = None,
+    title_lines: list[str] | None = None,
+    cues: list[lc.Cue] | None = None,
+    scratch_dir: Path | None = None,
+    voice_clarity: bool = False,
+    voice_pitch: float = 1.0,
+    music_compress: bool = False,
+    music_dip_hz: float = 450.0,
+    music_dip_db: float = 0.0,
     music: Path | None = None,
     music_db: float = -26.0,
     music_offset: float = 0.0,
@@ -297,6 +382,24 @@ def render_clip(
     top_flip = "hflip," if flip == "top" else ""
     out_flip = ",hflip" if flip == "all" else ""
 
+    if layout == "center":
+        if geom is None or style is None:
+            raise ValueError("centre layout needs geom and style")
+        video_graph, video_label = lc.video_graph(
+            parts=parts,
+            broll_index=len(parts),
+            src_crop=src_crop,
+            flip=flip,
+            geom=geom,
+            style=style,
+            title_lines=title_lines or [],
+            cues=cues or [],
+            text_dir=(scratch_dir or shorts_dir / ".scratch") / "text",
+            stem=seg["id"],
+        )
+    else:
+        video_graph = video_label = ""
+
     top_chain = "".join(
         f"[{i}:v]{pre}scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
         f"crop={out_w}:{half_h},{top_flip}fps=30,setsar=1[p{i}];"
@@ -309,23 +412,44 @@ def render_clip(
         joined = f"{pairs}concat=n={len(parts)}:v=1:a=1[top][speech];"
     bed_idx = len(parts)
 
+    # The talk's own audio is treated before anything is mixed onto it, so
+    # the bed's measured level is a level against the treated voice.
+    voice = lc.voice_chain(clarity=voice_clarity, pitch=voice_pitch)
+    if voice:
+        pre_audio = f"[speech]{voice}[speechx];"
+        speech_label = "[speechx]"
+    else:
+        pre_audio = ""
+        speech_label = "[speech]"
+
     if music is None:
-        audio_chain = ""
-        audio_map = "[speech]"
+        audio_chain = pre_audio
+        audio_map = speech_label
     else:
         # The music is mastered far hotter than the talk (-9.6 LUFS against
         # -21.7 on this source), so it is cut right down and then ducked
         # against the speech itself -- otherwise it buries the teaching.
         fade_out = max(0.0, dur - music_fade)
         fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
-        music_chain = (
-            f"[{bed_idx + 1}:a]{fmt},volume={music_db}dB,"
-            f"afade=t=in:st=0:d={music_fade},"
-            f"afade=t=out:st={fade_out:.3f}:d={music_fade}[mus];"
-        )
+        if music_compress or music_dip_db:
+            shaped = lc.music_chain(
+                gain_db=music_db,
+                fade=music_fade,
+                duration=dur,
+                compress=music_compress,
+                dip_hz=music_dip_hz,
+                dip_db=music_dip_db,
+            )
+            music_chain = f"[{bed_idx + 1}:a]{shaped}[mus];"
+        else:
+            music_chain = (
+                f"[{bed_idx + 1}:a]{fmt},volume={music_db}dB,"
+                f"afade=t=in:st=0:d={music_fade},"
+                f"afade=t=out:st={fade_out:.3f}:d={music_fade}[mus];"
+            )
         if duck:
             audio_chain = (
-                f"[speech]{fmt},asplit=2[sp][sc];"
+                f"{pre_audio}{speech_label}{fmt},asplit=2[sp][sc];"
                 f"{music_chain}"
                 f"[mus][sc]sidechaincompress="
                 f"threshold={duck_threshold}:ratio={duck_ratio}:"
@@ -335,19 +459,26 @@ def render_clip(
         else:
             # One constant level. Only the entrance and exit fades change it.
             audio_chain = (
-                f"[speech]{fmt}[sp];"
+                f"{pre_audio}{speech_label}{fmt}[sp];"
                 f"{music_chain}"
                 f"[sp][mus]amix=inputs=2:duration=first:normalize=0[aout];"
             )
         audio_map = "[aout]"
 
-    filt = (
-        f"{top_chain}{joined}"
-        f"[{bed_idx}:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{half_h},fps=30,setsar=1[bot];"
-        f"{audio_chain}"
-        f"[top][bot]vstack=inputs=2{out_flip}[v]"
-    )
+    if layout == "center":
+        # The talk chains, the concat and the whole picture side come from
+        # layout_center; only the audio is shared with the half layout.
+        filt = f"{video_graph};{audio_chain.rstrip(';')}"
+        map_video = video_label
+    else:
+        filt = (
+            f"{top_chain}{joined}"
+            f"[{bed_idx}:v]scale={out_w}:{half_h}:force_original_aspect_ratio=increase,"
+            f"crop={out_w}:{half_h},fps=30,setsar=1[bot];"
+            f"{audio_chain}"
+            f"[top][bot]vstack=inputs=2{out_flip}[v]"
+        )
+        map_video = "[v]"
 
     cmd = [str(ffmpeg), "-y"]
     for p in parts:
@@ -374,11 +505,20 @@ def render_clip(
             "-i",
             str(music),
         ]
+    # A caption per transcript line puts dozens of drawtext filters in the
+    # graph, and Windows caps a command line at 32767 characters. Passing the
+    # graph as a file sidesteps the limit rather than hoping it fits.
+    if len(filt) > 8000:
+        graphs = scratch_dir or shorts_dir / ".scratch"
+        graphs.mkdir(parents=True, exist_ok=True)
+        script = graphs / f"{seg['id']}_graph.txt"
+        script.write_text(filt, encoding="utf-8")
+        cmd += ["-filter_complex_script", str(script)]
+    else:
+        cmd += ["-filter_complex", filt]
     cmd += [
-        "-filter_complex",
-        filt,
         "-map",
-        "[v]",
+        map_video,
         "-map",
         audio_map,
         "-c:v",
@@ -402,6 +542,27 @@ def render_clip(
     return out
 
 
+def _drawtext_path(path: Path) -> str:
+    """Escape a Windows path for a drawtext option value.
+
+    drawtext splits options on ':' and treats a backslash as an escape, so a
+    raw Windows path silently truncates the filter. chr(92) rather than a
+    literal so the escaping is unambiguous to read.
+    """
+    sep = chr(92)
+    return str(path).replace(sep, "/").replace(":", sep + ":")
+
+
+def _wrap_headline(text: str, *, font_size: int, width_px: int, max_lines: int) -> list[str]:
+    """Wrap to the drawn width, estimating Arial Bold at ~0.52em per glyph."""
+    per_line = max(8, int(width_px / (font_size * 0.52)))
+    lines = textwrap.wrap(" ".join(text.split()), width=per_line)
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+        lines[-1] = lines[-1].rstrip(" ,.;:") + "..."
+    return lines or [""]
+
+
 def make_thumbnail(
     seg: dict,
     clip: Path,
@@ -410,72 +571,87 @@ def make_thumbnail(
     ffmpeg: Path,
     badge: str,
     topic: str,
+    font: Path,
+    color: str,
+    size: int,
+    max_lines: int,
+    margin: int,
+    headline: bool = True,
 ) -> Path:
+    """A frame from the clip with a gold headline over the lower, B-roll half.
+
+    ``headline=False`` returns the frame alone. The centre layout already burns
+    the same line into the picture, so drawing it again put the title on screen
+    twice and landed the second copy across the caption.
+
+    The headline is "thumb_text" on the segment when present -- a line written
+    for the thumbnail rather than the first sentence of the transcript, which
+    is what "title" holds and rarely reads as a hook.
+
+    The text goes through a file, not an inline text= value: Vietnamese
+    headlines carry commas, colons and question marks, and each of those needs
+    different escaping inside a filter string.
+
+    Impact and Arial Narrow are not options here -- both lack the Vietnamese
+    u-horn glyphs and render tofu boxes for u/uu/ur.
+    """
     shorts_dir.mkdir(parents=True, exist_ok=True)
     frame = shorts_dir / f"{seg['id']}_frame.jpg"
     thumb = shorts_dir / f"{seg['id']}.jpg"
     mid = max(0.8, min(seg["duration"] * 0.35, seg["duration"] - 0.5))
     subprocess.run(
         [
-            str(ffmpeg),
-            "-y",
-            "-ss",
-            f"{mid:.2f}",
-            "-i",
-            str(clip),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            str(frame),
+            str(ffmpeg), "-y", "-ss", f"{mid:.2f}", "-i", str(clip),
+            "-frames:v", "1", "-q:v", "2", str(frame),
         ],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
 
-    title = seg["title"].replace("'", "").replace('"', "").replace(":", " -").replace("%", "")
-    lines = textwrap.wrap(title, width=16)[:3] or [seg["id"]]
-    font = "C\\:/Windows/Fonts/arial.ttf"
-    if not Path(r"C:\Windows\Fonts\arial.ttf").is_file():
-        font = "C\\:/Windows/Fonts/tahoma.ttf"
+    if not headline:
+        thumb.write_bytes(frame.read_bytes())
+        frame.unlink(missing_ok=True)
+        return thumb
 
-    badge_safe = badge.replace("'", "").replace(":", " -")
-    topic_safe = topic.replace("'", "").replace(":", " -")
+    text = str(seg.get("thumb_text") or seg.get("title") or seg["id"]).strip()
+    if not font.is_file():
+        font = Path(r"C:/Windows/Fonts/arial.ttf")
+    lines = _wrap_headline(
+        text, font_size=size, width_px=1080 - 2 * 60, max_lines=max_lines
+    )
+
+    # Vietnamese stacks diacritics, so it needs more leading than Latin text.
+    line_h = int(size * 1.30)
+    block_h = line_h * len(lines)
+    top = max(0, 1920 - margin - block_h)
+    pad = int(size * 0.35)
+
+    # One drawtext per line, each centred on its own width. Passing all the
+    # lines as a single multi-line textfile centres the block but left-aligns
+    # the lines inside it, so a short last line hangs off to one side.
     draws = [
-        f"drawbox=x=0:y=80:w=iw:h={80 + 78 * len(lines)}:color=black@0.55:t=fill",
-        (
-            f"drawtext=fontfile={font}:text='{badge_safe}':fontsize=36:fontcolor=gold:"
-            f"borderw=3:bordercolor=black:x=(w-text_w)/2:y=40"
-        ),
+        f"drawbox=x=0:y={top - pad}:w=iw:h={block_h + 2 * pad}:color=black@0.55:t=fill"
     ]
-    y = 100
-    for line in lines:
-        safe = line.replace("\\", "\\\\").replace(":", "\\:")
+    line_files: list[Path] = []
+    for i, line in enumerate(lines):
+        line_file = shorts_dir / f"{seg['id']}_thumb{i}.txt"
+        line_file.write_text(line, encoding="utf-8")
+        line_files.append(line_file)
         draws.append(
-            f"drawtext=fontfile={font}:text='{safe}':fontsize=58:fontcolor=white:"
-            f"borderw=4:bordercolor=black:x=(w-text_w)/2:y={y}"
+            f"drawtext=fontfile='{_drawtext_path(font)}'"
+            f":textfile='{_drawtext_path(line_file)}'"
+            f":fontsize={size}:fontcolor={color}"
+            f":borderw={max(4, size // 14)}:bordercolor=black"
+            f":x=(w-text_w)/2:y={top + i * line_h}"
         )
-        y += 78
-    draws.append(
-        f"drawtext=fontfile={font}:text='{topic_safe}':fontsize=42:fontcolor=white:"
-        f"borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-120"
-    )
-    vf = ",".join(draws)
     proc = subprocess.run(
-        [str(ffmpeg), "-y", "-i", str(frame), "-vf", vf, "-q:v", "3", str(thumb)],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
+        [str(ffmpeg), "-y", "-i", str(frame), "-vf", ",".join(draws), "-q:v", "3", str(thumb)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
     if proc.returncode != 0 or not thumb.is_file():
         if frame.is_file():
             thumb.write_bytes(frame.read_bytes())
-    if frame.is_file():
-        frame.unlink(missing_ok=True)
+    for tmp in (frame, *line_files):
+        tmp.unlink(missing_ok=True)
     return thumb
 
 
@@ -529,6 +705,34 @@ def run(settings: Settings) -> int:
 
     brolls = broll_files(settings.broll_dir)
     ffmpeg = _ffmpeg()
+
+    # The centre layout needs a full-frame scene background, a talk height, and
+    # -- for captions -- the transcript, whichever list of segments was used.
+    style: lc.CentreStyle | None = None
+    talk_h = 0
+    caption_source: list[dict] = []
+    if settings.layout == "center":
+        style = lc.CentreStyle(
+            font=settings.centre_font,
+            title_size=settings.title_size,
+            title_lines=settings.title_max_lines,
+            caption_size=settings.caption_size,
+            caption_lines=settings.caption_max_lines,
+        )
+        talk_h = settings.talk_h or _talk_height(
+            settings.source, settings.src_crop, settings.out_w
+        )
+        print(f"layout=center talk={settings.out_w}x{talk_h} font={style.font.name}")
+        if settings.captions:
+            if not transcript_path.is_file():
+                raise SystemExit(
+                    f"captions need a transcript: {transcript_path}\n"
+                    "Run scripts/shorts/transcribe.py first, or pass --no-captions."
+                )
+            caption_source = json.loads(transcript_path.read_text(encoding="utf-8"))["segments"]
+            print(f"captions from {len(caption_source)} transcript lines")
+
+    bed_h = settings.out_h if settings.layout == "center" else settings.out_h // 2
     bed: Path | None = None
     bed_dur = 0.0
     if settings.broll_bed:
@@ -539,23 +743,66 @@ def run(settings: Settings) -> int:
         bed_name = (
             f"broll_bed_s{settings.broll_seed}.mp4" if settings.broll_seed else "broll_bed.mp4"
         )
+        # The height is part of the name too. A full-frame strip and a
+        # half-frame one are not interchangeable, and the finished projects
+        # must keep reading the file they already built.
+        if bed_h != settings.out_h // 2:
+            bed_name = bed_name.replace(".mp4", f"_h{bed_h}.mp4")
         bed = build_bed(
             brolls,
             cache / bed_name,
             ffmpeg=ffmpeg,
             chunk=settings.broll_chunk,
             out_w=settings.out_w,
-            half_h=settings.out_h // 2,
+            half_h=bed_h,
         )
         bed_dur = _media_duration(bed)
         print(f"broll bed: {bed.name} {bed_dur:.1f}s from {len(brolls)} scenes")
     music_dur = 0.0
+    music_db_eff = settings.music_db
+    music_levels: list[float] = []
     if settings.music is not None:
         if not settings.music.is_file():
             raise SystemExit(f"music not found: {settings.music}")
         music_dur = _media_duration(settings.music)
         how = "ducked" if settings.music_duck else "constant level"
         print(f"music: {settings.music.name} {music_dur:.0f}s at {settings.music_db}dB, {how}")
+        raw_db, shaped_db = lc.bed_levels_db(
+            ffmpeg,
+            settings.music,
+            compress=settings.music_compress,
+            dip_hz=settings.music_dip_hz,
+            dip_db=settings.music_dip_db,
+        )
+        if settings.music_under_db > 0:
+            # Aim the bed at the voice instead of asking for a raw gain. A gain
+            # is not portable between recordings: -20 dB sat 16 dB under the
+            # voice on song-tot and 20 dB under it here, because the voices are
+            # at different levels. "N dB under the speech" is the thing that
+            # was actually meant, so measure both and solve for the gain.
+            voice = lc.voice_chain(
+                clarity=settings.voice_clarity, pitch=settings.voice_pitch
+            )
+            spans = [(float(s["start"]), float(s["end"])) for s in segs]
+            speech_db = lc.speech_level_db(ffmpeg, settings.source, spans, chain=voice)
+            music_db_eff = speech_db - settings.music_under_db - shaped_db
+            print(
+                f"  speech {speech_db:.1f}dB, shaped bed {shaped_db:.1f}dB -> gain "
+                f"{music_db_eff:.1f}dB for {settings.music_under_db:.0f}dB under the voice"
+            )
+        elif shaped_db != raw_db:
+            # Shaping costs level as a side effect. Give it back so --music-db
+            # stays a gain relative to the track as delivered.
+            music_db_eff = settings.music_db + (raw_db - shaped_db)
+            print(
+                f"  shaping costs {raw_db - shaped_db:.1f}dB; "
+                f"bed gain set to {music_db_eff:.1f}dB"
+            )
+        if settings.music_window == "flattest":
+            music_levels = lc.track_levels(
+                ffmpeg, settings.music, cache / f"music_levels_{settings.music.stem}.json"
+            )
+            print(f"  scanning {len(music_levels)}s of track for the steadiest window per clip")
     rendered: list[dict] = []
     for i, seg in enumerate(segs):
         broll = brolls[i % len(brolls)]
@@ -567,6 +814,31 @@ def run(settings: Settings) -> int:
                 offset = ((idx * 0.6180339887498949) % 1.0) * bed_dur
             else:
                 offset = (idx * settings.broll_stride) % bed_dur
+        geom: lc.Geometry | None = None
+        title_lines: list[str] = []
+        cues: list[lc.Cue] = []
+        # The title's own size can come back reduced, so this clip's style is
+        # not necessarily the project's; geometry and drawing both use it.
+        clip_style = style
+        if style is not None:
+            headline = str(seg.get("thumb_text") or seg.get("title") or seg["id"]).strip()
+            title_lines, clip_style = lc.fit_title(
+                headline, style=style, ffmpeg=ffmpeg, scratch=cache / "fit"
+            )
+            if clip_style.title_size != style.title_size:
+                print(f"  title set at {clip_style.title_size}px so the words break cleanly")
+            geom = lc.geometry(
+                talk_h=talk_h, title_line_count=len(title_lines), style=clip_style
+            )
+            if caption_source:
+                cues = lc.caption_cues(
+                    caption_source,
+                    seg.get("parts") or [{"start": seg["start"], "end": seg["end"]}],
+                    style=style,
+                )
+            for note in geom.notes:
+                print(f"  NOTE {note}")
+
         out_clip = shorts_dir / f"{seg['id']}.mp4"
         out_thumb = shorts_dir / f"{seg['id']}.jpg"
         print(f"[{i + 1}/{len(segs)}] render {seg['id']} + {broll.name}")
@@ -586,9 +858,24 @@ def run(settings: Settings) -> int:
                     src_crop=settings.src_crop,
                     bed_offset=offset,
                     flip=settings.flip,
+                    layout=settings.layout,
+                    scratch_dir=cache,
+                    geom=geom,
+                    style=clip_style,
+                    title_lines=title_lines,
+                    cues=cues,
+                    voice_clarity=settings.voice_clarity,
+                    voice_pitch=settings.voice_pitch,
+                    music_compress=settings.music_compress,
+                    music_dip_hz=settings.music_dip_hz,
+                    music_dip_db=settings.music_dip_db,
                     music=settings.music,
-                    music_db=settings.music_db,
-                    music_offset=_music_offset_for(i, settings, music_dur),
+                    music_db=music_db_eff,
+                    music_offset=(
+                        lc.flattest_offset(music_levels, seg["duration"])
+                        if music_levels
+                        else _music_offset_for(i, settings, music_dur)
+                    ),
                     music_fade=settings.music_fade,
                     duck=settings.music_duck,
                     duck_threshold=settings.music_duck_threshold,
@@ -606,6 +893,12 @@ def run(settings: Settings) -> int:
                     ffmpeg=ffmpeg,
                     badge=settings.badge,
                     topic=settings.topic,
+                    font=settings.thumb_font,
+                    color=settings.thumb_color,
+                    size=settings.thumb_size,
+                    max_lines=settings.thumb_lines,
+                    margin=settings.thumb_margin,
+                    headline=settings.layout != "center",
                 )
             rendered.append(
                 {
@@ -618,6 +911,7 @@ def run(settings: Settings) -> int:
                     "thumb": str(thumb),
                     "broll": broll.name,
                     "broll_offset": None if offset is None else round(offset, 2),
+                    "captions": len(cues),
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -639,6 +933,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--badge", default="SPEAKER", help="Top badge on thumbnail.")
     parser.add_argument("--topic", default="SHORT", help="Bottom topic label on thumbnail.")
     parser.add_argument("--title-fallback", default="Short clip")
+    parser.add_argument(
+        "--thumb-font",
+        type=Path,
+        default=Path(r"C:/Windows/Fonts/arialbd.ttf"),
+        help="Headline font. Impact and Arial Narrow lack Vietnamese u-horn glyphs.",
+    )
+    parser.add_argument("--thumb-color", default="0xFFD24A", help="Headline colour.")
+    parser.add_argument("--thumb-size", type=int, default=84)
+    parser.add_argument("--thumb-lines", type=int, default=3)
+    parser.add_argument(
+        "--thumb-margin", type=int, default=150,
+        help="Gap from the bottom of the frame to the headline block.",
+    )
     parser.add_argument(
         "--src-crop",
         default="",
@@ -677,6 +984,74 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=0,
         help="Shuffle B-roll order with this seed (0 = sorted).",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=("half", "center"),
+        default="half",
+        help="half: talk over B-roll. center: talk framed by scenes, title above, caption below.",
+    )
+    parser.add_argument(
+        "--talk-h",
+        type=int,
+        default=0,
+        help="Talk height in the centre layout; 0 derives it from the source aspect.",
+    )
+    parser.add_argument(
+        "--no-captions",
+        dest="captions",
+        action="store_false",
+        help="Centre layout without the spoken caption under the talk.",
+    )
+    parser.add_argument(
+        "--centre-font",
+        type=Path,
+        default=Path(r"C:/Windows/Fonts/seguibl.ttf"),
+        help="Title and caption font. Arial Black and Oswald lack Vietnamese glyphs.",
+    )
+    parser.add_argument("--title-size", type=int, default=78)
+    parser.add_argument("--title-max-lines", type=int, default=2)
+    parser.add_argument("--caption-size", type=int, default=54)
+    parser.add_argument("--caption-max-lines", type=int, default=2)
+    parser.add_argument(
+        "--voice-clarity",
+        action="store_true",
+        help="Clean up the talk audio: rumble out, low-mid down, consonants up, levelled.",
+    )
+    parser.add_argument(
+        "--voice-pitch",
+        type=float,
+        default=1.0,
+        help="Pitch ratio for the talk; 0.95 is five percent deeper. Duration is preserved.",
+    )
+    parser.add_argument(
+        "--music-compress",
+        action="store_true",
+        help="Hold the bed at one level; a track with struck bells swings 6dB on its own.",
+    )
+    parser.add_argument(
+        "--music-dip-hz",
+        type=float,
+        default=450.0,
+        help="Centre of the bed's dip, where the voice and the room tone sit.",
+    )
+    parser.add_argument(
+        "--music-dip-db",
+        type=float,
+        default=0.0,
+        help="Depth of that dip in dB, e.g. -5. Zero disables it.",
+    )
+    parser.add_argument(
+        "--music-under-db",
+        type=float,
+        default=0.0,
+        help="Put the bed this many dB under the measured speech, e.g. 14. Overrides --music-db.",
+    )
+    parser.add_argument(
+        "--music-window",
+        choices=("fixed", "flattest"),
+        default="fixed",
+        help="flattest: pin each clip's bed to the steadiest stretch of the track.",
     )
     parser.add_argument(
         "--flip",
@@ -746,6 +1121,11 @@ def main(argv: list[str] | None = None) -> int:
         badge=args.badge,
         topic=args.topic,
         title_fallback=args.title_fallback,
+        thumb_font=args.thumb_font,
+        thumb_color=args.thumb_color,
+        thumb_size=args.thumb_size,
+        thumb_lines=args.thumb_lines,
+        thumb_margin=args.thumb_margin,
         limit=args.limit,
         src_crop=args.src_crop,
         reuse_segments=args.reuse_segments,
@@ -757,6 +1137,21 @@ def main(argv: list[str] | None = None) -> int:
         broll_spread=args.broll_spread,
         broll_start_index=args.broll_start_index,
         flip=args.flip,
+        layout=args.layout,
+        talk_h=args.talk_h,
+        captions=args.captions,
+        centre_font=args.centre_font,
+        title_size=args.title_size,
+        title_max_lines=args.title_max_lines,
+        caption_size=args.caption_size,
+        caption_max_lines=args.caption_max_lines,
+        voice_clarity=args.voice_clarity,
+        voice_pitch=args.voice_pitch,
+        music_compress=args.music_compress,
+        music_dip_hz=args.music_dip_hz,
+        music_dip_db=args.music_dip_db,
+        music_window=args.music_window,
+        music_under_db=args.music_under_db,
         music=args.music,
         music_db=args.music_db,
         music_fade=args.music_fade,
