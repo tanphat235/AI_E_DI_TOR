@@ -122,7 +122,7 @@ The recipe, with the numbers that were measured rather than chosen:
   --src-crop <w:h:x:y> `           # measure it first; see the standing rule above
   --layout center `
   --flip top `                     # mirrors the talk only; text is drawn after
-  --voice-clarity --voice-pitch 0.95 `
+  --voice-clarity --voice-pitch 0.94 `
   --music projects\music-background\"phat phap cung tieng mo.mp4" `
   --music-duck off --music-compress --music-dip-db -5 --music-fade 1.0 `
   --music-window flattest --music-under-db 14 `
@@ -160,9 +160,39 @@ chain's own gain: -7.0 dB below 80 Hz, -0.8 dB at 250-500, +3.7 dB at 2-4 kHz,
 +2.2 dB at 5-8 kHz. The last one is not asked for and comes from the
 compressor lifting quiet air; it has not been a problem but it is there.
 
-`--voice-pitch 0.95` lowers the voice five percent, tempo restored, so the
-duration is unchanged. Verified: F0 178.8 Hz -> 170.8 Hz, -0.79 semitones, and
-the finished audio track came out within 5 ms of the video.
+`--voice-pitch 0.94` lowers the voice about six percent, tempo restored, so
+the duration is unchanged -- measured drift is under 5 ms on a 90 s sample.
+
+This number was settled by the user's ear over three passes, and the history is
+the point: **0.95** (-0.80 semitones) was asked for first and judged not deep
+enough; **0.92** (-1.38) was the answer to "deeper" and came back as *trầm
+quá*; **0.94** (-1.06) sits between them and is what new clips use. Measured on
+90 s of the song-tot talk, F0 189.7 Hz untreated. Do not "restore" 0.95 or
+0.92 -- both have already been rejected.
+
+Going much below 0.90 is a separate problem rather than a matter of taste:
+`asetrate` shifts the formants along with the pitch, so past roughly ten
+percent the voice stops sounding deeper and starts sounding slowed.
+
+### Joining spans with a transition
+
+`--part-transition dissolve --part-transition-sec 0.5` cross-fades between the
+spans of a multi-part clip instead of hard-cutting. Use it when the spans come
+from different places in the talk; keep `cut` inside one continuous answer,
+where a dissolve would say "time passed" about a sentence that never stopped.
+
+**Each junction shortens the clip by the transition length**, because xfade and
+acrossfade consume it from both sides. Three spans totalling 155.45 s with two
+0.5 s dissolves finish at 154.45 s. Every other clock is told through
+`overlap_for()`: the caption times, the music fade-out, and the `-t` on the
+B-roll. Without that correction the captions ran 1.00 s past the end of this
+clip -- half a second per junction, and it compounds.
+
+**`fps` must be the last filter before xfade.** With `setpts=PTS-STARTPTS`
+after it, xfade refuses the input with "the inputs needs to be a constant frame
+rate; current rate of 1/0 is invalid" -- setpts clears the frame-rate metadata
+that fps had just set, and the whole render dies with a bare `-22 Invalid
+argument` from the encoder threads that says nothing about the cause.
 
 ### Three traps this cost, worth knowing before touching the audio chain
 

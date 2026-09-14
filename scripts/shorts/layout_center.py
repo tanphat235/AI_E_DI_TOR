@@ -246,6 +246,7 @@ def caption_cues(
     *,
     style: CentreStyle,
     min_dur: float = 0.35,
+    overlap: float = 0.0,
 ) -> list[Cue]:
     """Transcript lines that fall inside the clip, in clip time.
 
@@ -283,7 +284,9 @@ def caption_cues(
             for page, span in zip(pages, spans, strict=True):
                 cues.append(Cue(start=t, end=t + span, lines=tuple(page)))
                 t += span
-        offset += p1 - p0
+        # A cross-fade eats ``overlap`` seconds at each junction, so every part
+        # after the first begins that much earlier than its spans imply.
+        offset += (p1 - p0) - overlap
 
     cues.sort(key=lambda c: c.start)
     # Transcript lines abut, and a cue that ends exactly where the next begins
@@ -380,6 +383,48 @@ def _cue_runs(cues: list[Cue], join: float) -> list[tuple[float, float]]:
     return runs
 
 
+def overlap_for(transition: str, transition_sec: float) -> float:
+    """Seconds each junction removes from the timeline. Zero for a hard cut.
+
+    xfade and acrossfade both consume the transition from *both* sides, so a
+    clip of n parts finishes (n-1)*transition_sec shorter than the sum of its
+    spans. Every other clock -- the caption times, the music fade-out, the -t
+    on the B-roll -- has to be told, or the captions drift half a second per
+    junction and the bed fades early.
+    """
+    return 0.0 if transition == "cut" else max(0.0, transition_sec)
+
+
+def _transition_chain(parts: list[dict], transition: str, secs: float) -> list[str]:
+    """Cross-fade the parts together, picture and sound, one junction at a time.
+
+    A dissolve here is not decoration: these spans are cut from different
+    places in one talk, and a hard cut between them reads as a glitch where a
+    dissolve reads as "later, on the same subject".
+    """
+    kind = "fade" if transition == "dissolve" else transition
+    chains: list[str] = []
+    for i in range(len(parts)):
+        chains.append(f"[{i}:a]asetpts=PTS-STARTPTS[a{i}]")
+    v_prev, a_prev = "p0", "a0"
+    # Length of the chain built so far, which is where the next junction goes.
+    acc = float(parts[0]["end"] - parts[0]["start"])
+    for i in range(1, len(parts)):
+        d = float(parts[i]["end"] - parts[i]["start"])
+        offset = max(0.0, acc - secs)
+        v_out, a_out = f"vx{i}", f"ax{i}"
+        chains.append(
+            f"[{v_prev}][p{i}]xfade=transition={kind}:duration={secs:.3f}"
+            f":offset={offset:.3f}[{v_out}]"
+        )
+        chains.append(f"[{a_prev}][a{i}]acrossfade=d={secs:.3f}:c1=tri:c2=tri[{a_out}]")
+        v_prev, a_prev = v_out, a_out
+        acc = acc + d - secs
+    chains.append(f"[{v_prev}]null[talk]")
+    chains.append(f"[{a_prev}]anull[speech]")
+    return chains
+
+
 def video_graph(
     *,
     parts: list[dict],
@@ -392,6 +437,8 @@ def video_graph(
     cues: list[Cue],
     text_dir: Path,
     stem: str,
+    transition: str = "cut",
+    transition_sec: float = 0.5,
 ) -> tuple[str, str]:
     """Filter graph for the centre layout, plus the label carrying the picture.
 
@@ -406,16 +453,27 @@ def video_graph(
 
     for i in range(len(parts)):
         pre = f"crop={src_crop}," if src_crop else ""
+        # setpts resets each part's clock to zero: xfade reads its offset on
+        # the first input's own timeline, and a part cut with -ss carries the
+        # source's timestamps unless they are reset.
+        #
+        # The order matters and is not cosmetic. With setpts AFTER fps, xfade
+        # refuses the input with "the inputs needs to be a constant frame rate;
+        # current rate of 1/0 is invalid" -- setpts clears the frame-rate
+        # metadata that fps had just established. fps has to come last.
         chains.append(
             f"[{i}:v]{pre}scale={FRAME_W}:{geom.talk_h}:force_original_aspect_ratio=increase,"
-            f"crop={FRAME_W}:{geom.talk_h},{talk_flip}fps=30,setsar=1[p{i}]"
+            f"crop={FRAME_W}:{geom.talk_h},{talk_flip}setpts=PTS-STARTPTS,"
+            f"fps=30,setsar=1[p{i}]"
         )
     if len(parts) == 1:
         chains.append("[p0]null[talk]")
         chains.append("[0:a]anull[speech]")
-    else:
+    elif transition == "cut":
         pairs = "".join(f"[p{i}][{i}:a]" for i in range(len(parts)))
         chains.append(f"{pairs}concat=n={len(parts)}:v=1:a=1[talk][speech]")
+    else:
+        chains.extend(_transition_chain(parts, transition, transition_sec))
 
     chains.append(
         f"[{broll_index}:v]scale={FRAME_W}:{FRAME_H}:force_original_aspect_ratio=increase,"

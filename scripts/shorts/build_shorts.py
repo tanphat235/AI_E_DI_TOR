@@ -156,6 +156,11 @@ class Settings:
     # that clip's own length, instead of spreading offsets across it. Costs one
     # decode of the whole track, cached.
     music_window: str = "fixed"
+    # Cross-fade between the spans of a multi-part clip. "cut" is a hard join,
+    # which is right inside one continuous answer and wrong between passages
+    # taken from different places in the talk.
+    part_transition: str = "cut"
+    part_transition_sec: float = 0.5
     # Aim the bed this many dB under the measured speech, instead of asking
     # for a raw --music-db. Zero keeps the raw-gain behaviour the finished
     # projects were tuned with.
@@ -354,6 +359,8 @@ def render_clip(
     title_lines: list[str] | None = None,
     cues: list[lc.Cue] | None = None,
     scratch_dir: Path | None = None,
+    transition: str = "cut",
+    transition_sec: float = 0.5,
     voice_clarity: bool = False,
     voice_pitch: float = 1.0,
     music_compress: bool = False,
@@ -374,7 +381,11 @@ def render_clip(
     # A segment is either one span, or a "parts" list spliced in the order given
     # -- which need not be chronological.
     parts = seg.get("parts") or [{"start": seg["start"], "end": seg["end"]}]
-    dur = sum(p["end"] - p["start"] for p in parts)
+    # Every junction removes the cross-fade from the timeline, so the finished
+    # clip is shorter than the sum of its spans. The B-roll length, the music
+    # fade and the caption times all read this, not the raw sum.
+    overlap = lc.overlap_for(transition, transition_sec) if len(parts) > 1 else 0.0
+    dur = sum(p["end"] - p["start"] for p in parts) - overlap * (len(parts) - 1)
     pre = f"crop={src_crop}," if src_crop else ""
 
     # "top" mirrors only the talk, so a speaker facing left now faces right;
@@ -396,6 +407,8 @@ def render_clip(
             cues=cues or [],
             text_dir=(scratch_dir or shorts_dir / ".scratch") / "text",
             stem=seg["id"],
+            transition=transition,
+            transition_sec=transition_sec,
         )
     else:
         video_graph = video_label = ""
@@ -831,10 +844,20 @@ def run(settings: Settings) -> int:
                 talk_h=talk_h, title_line_count=len(title_lines), style=clip_style
             )
             if caption_source:
+                clip_parts = seg.get("parts") or [
+                    {"start": seg["start"], "end": seg["end"]}
+                ]
                 cues = lc.caption_cues(
                     caption_source,
-                    seg.get("parts") or [{"start": seg["start"], "end": seg["end"]}],
+                    clip_parts,
                     style=style,
+                    overlap=(
+                        lc.overlap_for(
+                            settings.part_transition, settings.part_transition_sec
+                        )
+                        if len(clip_parts) > 1
+                        else 0.0
+                    ),
                 )
             for note in geom.notes:
                 print(f"  NOTE {note}")
@@ -860,6 +883,8 @@ def run(settings: Settings) -> int:
                     flip=settings.flip,
                     layout=settings.layout,
                     scratch_dir=cache,
+                    transition=settings.part_transition,
+                    transition_sec=settings.part_transition_sec,
                     geom=geom,
                     style=clip_style,
                     title_lines=title_lines,
@@ -1048,6 +1073,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Put the bed this many dB under the measured speech, e.g. 14. Overrides --music-db.",
     )
     parser.add_argument(
+        "--part-transition",
+        choices=("cut", "fade", "dissolve", "fadeblack", "wipeleft", "smoothleft"),
+        default="cut",
+        help="Join between the spans of a multi-part clip. 'cut' is a hard join.",
+    )
+    parser.add_argument(
+        "--part-transition-sec",
+        type=float,
+        default=0.5,
+        help="Cross-fade length in seconds; each junction shortens the clip by this.",
+    )
+    parser.add_argument(
         "--music-window",
         choices=("fixed", "flattest"),
         default="fixed",
@@ -1151,6 +1188,8 @@ def main(argv: list[str] | None = None) -> int:
         music_dip_hz=args.music_dip_hz,
         music_dip_db=args.music_dip_db,
         music_window=args.music_window,
+        part_transition=args.part_transition,
+        part_transition_sec=args.part_transition_sec,
         music_under_db=args.music_under_db,
         music=args.music,
         music_db=args.music_db,
