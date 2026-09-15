@@ -41,6 +41,9 @@ import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Defaults for a vertical short. A job can ask for another frame -- the long
+# landscape cut of a talk uses 1920x1080 with the same bands -- by setting
+# frame_w/frame_h on the style, so nothing here may assume portrait.
 FRAME_W = 1080
 FRAME_H = 1920
 
@@ -71,6 +74,8 @@ class CentreStyle:
     wrap_frac: float = 0.90
     # Advance width per character, in ems, used to wrap without a font engine.
     # Segoe UI Black measured 0.578 em for caps and 0.530 for mixed case.
+    frame_w: int = FRAME_W
+    frame_h: int = FRAME_H
     em_caps: float = 0.578
     em_mixed: float = 0.530
     # Height of one drawn line including diacritics and descenders: measured
@@ -106,6 +111,18 @@ class Geometry:
 
 
 _BS = chr(92)
+
+# Vietnamese function words that attach to whatever follows them, so a title
+# line must not end on one.
+#
+# Deliberately short, and deliberately without the locatives. "trên", "dưới",
+# "trong", "ngoài" bind forward in "trên bàn" but close a phrase in "ở dưới",
+# and including them penalised "MUỐN ÔNG BÀ Ở DƯỚI / HAY Ở TRÊN?" into a 62px
+# title. A false penalty costs a size drop, which is the worse failure, so an
+# ambiguous word is left out. The newline override is there for the rest.
+_BINDS_FORWARD = frozenset(
+    ["ở", "và", "với", "cho", "của", "là", "mà", "thì", "để", "từ", "về", "theo"]
+)
 
 
 def drawtext_path(path: Path) -> str:
@@ -150,7 +167,7 @@ def wrap(
     text = " ".join(text.split())
     if not text:
         return []
-    avail = width_px if width_px is not None else int(FRAME_W * style.wrap_frac)
+    avail = width_px if width_px is not None else int(style.frame_w * style.wrap_frac)
     per_line = max(6, int(avail / (size * _em(text, style))))
     lines = textwrap.wrap(text, width=per_line) or [text]
     if not balance or len(lines) < 2:
@@ -181,14 +198,14 @@ def geometry(*, talk_h: int, title_line_count: int, style: CentreStyle) -> Geome
     title_pad = int(style.title_size * style.pad_ratio)
     caption_pad = int(style.caption_size * style.pad_ratio)
 
-    talk_y = (FRAME_H - talk_h) // 2
+    talk_y = (style.frame_h - talk_h) // 2
     title_block = title_line_h * max(1, title_line_count) + 2 * title_pad
     title_top = talk_y - style.gap - title_block + title_pad
     caption_top = talk_y + talk_h + style.gap + caption_pad
 
     scene_top_h = max(0, title_top - title_pad)
     caption_block = caption_line_h * style.caption_lines + 2 * caption_pad
-    scene_bottom_h = max(0, FRAME_H - (caption_top - caption_pad + caption_block))
+    scene_bottom_h = max(0, style.frame_h - (caption_top - caption_pad + caption_block))
 
     notes: list[str] = []
     if scene_top_h < 80:
@@ -437,6 +454,7 @@ def video_graph(
     cues: list[Cue],
     text_dir: Path,
     stem: str,
+    zoom: str = "",
     transition: str = "cut",
     transition_sec: float = 0.5,
 ) -> tuple[str, str]:
@@ -449,6 +467,9 @@ def video_graph(
     """
     text_dir.mkdir(parents=True, exist_ok=True)
     talk_flip = "hflip," if flip == "top" else ""
+    # Zoom before the flip: the face was measured on the unflipped band, so the
+    # crop offset is in unflipped coordinates.
+    zoom_step = f"{zoom}," if zoom else ""
     chains: list[str] = []
 
     for i in range(len(parts)):
@@ -462,8 +483,8 @@ def video_graph(
         # current rate of 1/0 is invalid" -- setpts clears the frame-rate
         # metadata that fps had just established. fps has to come last.
         chains.append(
-            f"[{i}:v]{pre}scale={FRAME_W}:{geom.talk_h}:force_original_aspect_ratio=increase,"
-            f"crop={FRAME_W}:{geom.talk_h},{talk_flip}setpts=PTS-STARTPTS,"
+            f"[{i}:v]{pre}scale={style.frame_w}:{geom.talk_h}:force_original_aspect_ratio=increase,"
+            f"crop={style.frame_w}:{geom.talk_h},{zoom_step}{talk_flip}setpts=PTS-STARTPTS,"
             f"fps=30,setsar=1[p{i}]"
         )
     if len(parts) == 1:
@@ -476,8 +497,8 @@ def video_graph(
         chains.extend(_transition_chain(parts, transition, transition_sec))
 
     chains.append(
-        f"[{broll_index}:v]scale={FRAME_W}:{FRAME_H}:force_original_aspect_ratio=increase,"
-        f"crop={FRAME_W}:{FRAME_H},fps=30,setsar=1[bg]"
+        f"[{broll_index}:v]scale={style.frame_w}:{style.frame_h}:force_original_aspect_ratio=increase,"
+        f"crop={style.frame_w}:{style.frame_h},fps=30,setsar=1[bg]"
     )
     frame_flip = ",hflip" if flip == "all" else ""
     chains.append(f"[bg][talk]overlay=0:{geom.talk_y}{frame_flip}[framed]")
@@ -540,7 +561,9 @@ def video_graph(
     return ";".join(chains), "[v]"
 
 
-def voice_chain(*, clarity: bool, pitch: float, sample_rate: int = 48000) -> str:
+def voice_chain(
+    *, clarity: bool, pitch: float, speed: float = 1.0, sample_rate: int = 48000
+) -> str:
     """Filters applied to the talk's own audio, or "" when both are off.
 
     Clarity is deliberately mild. The measured problem on these recordings is
@@ -591,6 +614,11 @@ def voice_chain(*, clarity: bool, pitch: float, sample_rate: int = 48000) -> str
         steps.append(f"asetrate={sample_rate}*{pitch:.6f}")
         steps.append(f"aresample={sample_rate}")
         steps.append(f"atempo={1.0 / pitch:.6f}")
+    if abs(speed - 1.0) > 1e-6:
+        # A second atempo, multiplying with the pitch one. Only the speech is
+        # slowed here: the bed is mixed in afterwards and keeps its own tempo,
+        # so it has to be given the OUTPUT length instead.
+        steps.append(f"atempo={speed:.6f}")
     return ",".join(steps)
 
 
@@ -883,10 +911,32 @@ def fit_title(
     """
     from dataclasses import replace
 
+    # A newline in the title is an instruction, not whitespace: the operator
+    # has chosen where the break goes. Evenness would override them --
+    # "ĐẠO PHẬT KHÔNG DẠY / ĐỐT VÀNG MÃ" is 18/11 and the algorithm prefers
+    # the 14/15 split -- so a given break is kept and only the size is chosen.
+    if "\n" in text:
+        fixed = [" ".join(line.split()) for line in text.split("\n") if line.strip()]
+        budget_px = int(style.frame_w * style.wrap_frac)
+        size = style.title_size
+        floor = max(24, int(style.title_size * min_size_frac))
+        while size > floor:
+            widths, space = _token_widths(
+                ffmpeg, style.font, size, [w for line in fixed for w in line.split()], scratch
+            )
+            longest = max(
+                sum(widths[w] for w in line.split()) + space * (len(line.split()) - 1)
+                for line in fixed
+            )
+            if longest <= budget_px:
+                break
+            size -= 4
+        return fixed, replace(style, title_size=size)
+
     tokens = " ".join(text.split()).split()
     if not tokens:
         return [], style
-    budget = int(FRAME_W * style.wrap_frac)
+    budget = int(style.frame_w * style.wrap_frac)
     size = style.title_size
     floor = max(24, int(style.title_size * min_size_frac))
 
@@ -911,6 +961,15 @@ def fit_title(
                 if max(px) > budget:
                     continue
                 orphans = sum(1 for x in lines[1:] if len(x[0]) <= 2)
+                # A line may not END on a word that binds to the next one:
+                # "MUỐN ÔNG BÀ Ở / DƯỚI HAY Ở TRÊN?" breaks "ở dưới". Length
+                # alone is the wrong test -- it also condemns "CÁCH GIÚP NGƯỜI
+                # ĐỔ VỠ / TRONG HÔN NHÂN", where VỠ completes the word before
+                # it, and that pushed an approved title from 78px to 58px.
+                # Hence a short list of forward-binding function words rather
+                # than a rule. It is not exhaustive; a newline in the title
+                # overrides all of this when the operator has a break in mind.
+                orphans += sum(1 for x in lines[:-1] if x[-1].lower() in _BINDS_FORWARD)
                 spread = max(px) - min(px)
                 key = (orphans, spread, [" ".join(x) for x in lines])
                 if best is None or key[:2] < best[:2]:
@@ -923,3 +982,111 @@ def fit_title(
             return best[2], replace(style, title_size=size)
         size -= 4
     return wrap(text, size=style.title_size, style=style, balance=True)[: style.title_lines], style
+
+
+# --------------------------------------------------------------------------
+# Framing the talk. A 16:9 talking head dropped into the centre band arrives
+# with the speaker small and often off to one side -- measured across three
+# sources, the face filled 0.181, 0.320 and 0.374 of the band's height and sat
+# at x = 0.546, 0.628 and 0.500. So the framing is measured per source rather
+# than set by eye, and it does two things: zoom in when the face is small, and
+# recentre when the speaker is not in the middle.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Framing:
+    """Where the face is in the talk band, and the zoom that would fix it."""
+
+    face_x: float
+    face_y: float
+    face_frac: float
+    zoom: float
+    frames_found: int
+    frames_tried: int
+
+
+def measure_face(
+    ffmpeg: Path,
+    source: Path,
+    *,
+    src_crop: str,
+    talk_h: int,
+    times: list[float],
+    frame_w: int = FRAME_W,
+    target_frac: float = 0.32,
+    zoom_max: float = 1.5,
+):
+    """Median face box in the talk band, and the zoom that reaches target_frac.
+
+    Measured on the band as it will actually be framed -- the source crop and
+    the scale-and-crop to 1080 x talk_h are applied first -- so the fractions
+    mean what they say and do not have to be transformed afterwards.
+
+    Returns None when too few frames yield a face; a guess is worse than
+    leaving the framing alone, and the caller says so rather than silently
+    zooming on nothing. Haar is frontal-only, so a speaker who spends the clip
+    in profile will legitimately come back empty.
+    """
+    import subprocess
+
+    import cv2
+    import numpy as np
+
+    casc = cv2.CascadeClassifier(
+        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    )
+    pre = f"crop={src_crop}," if src_crop else ""
+    vf = (
+        f"{pre}scale={frame_w}:{talk_h}:force_original_aspect_ratio=increase,"
+        f"crop={frame_w}:{talk_h},scale=400:-2"
+    )
+    boxes = []
+    for t in times:
+        proc = subprocess.run(
+            [str(ffmpeg), "-v", "error", "-ss", f"{t:.3f}", "-i", str(source),
+             "-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+            capture_output=True,
+        )
+        buf = np.frombuffer(proc.stdout, dtype=np.uint8)
+        if buf.size < 400:
+            continue
+        h = buf.size // 400
+        found = casc.detectMultiScale(
+            buf.reshape(h, 400), scaleFactor=1.08, minNeighbors=6, minSize=(24, 24)
+        )
+        if len(found):
+            x, y, w, fh = max(found, key=lambda b: b[2] * b[3])
+            boxes.append(((x + w / 2) / 400, (y + fh / 2) / h, fh / h))
+    if len(boxes) < 2:
+        return None
+    fx, fy, frac = (float(v) for v in np.median(np.array(boxes), axis=0))
+    zoom = min(zoom_max, max(1.0, target_frac / max(frac, 1e-6)))
+    return Framing(
+        face_x=fx, face_y=fy, face_frac=frac, zoom=zoom,
+        frames_found=len(boxes), frames_tried=len(times),
+    )
+
+
+def zoom_filter(
+    *,
+    zoom: float,
+    face_x: float,
+    face_y: float,
+    talk_h: int,
+    place_y: float,
+    frame_w: int = FRAME_W,
+) -> str:
+    """Scale the talk band up and crop back, putting the face where it belongs.
+
+    Applied after the band already exists at 1080 x talk_h, so the face
+    coordinates are in the band's own frame and the arithmetic stays readable.
+    The crop origin is clamped to the enlarged frame, which is what stops a
+    speaker near an edge from pulling the window off the picture.
+    """
+    zw, zh = int(round(frame_w * zoom)) // 2 * 2, int(round(talk_h * zoom)) // 2 * 2
+    x = int(round(face_x * zw - frame_w / 2))
+    y = int(round(face_y * zh - place_y * talk_h))
+    x = max(0, min(x, zw - frame_w))
+    y = max(0, min(y, zh - talk_h))
+    return f"scale={zw}:{zh},crop={frame_w}:{talk_h}:{x}:{y}"

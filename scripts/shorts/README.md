@@ -122,7 +122,8 @@ The recipe, with the numbers that were measured rather than chosen:
   --src-crop <w:h:x:y> `           # measure it first; see the standing rule above
   --layout center `
   --flip top `                     # mirrors the talk only; text is drawn after
-  --voice-clarity --voice-pitch 0.94 `
+  --talk-zoom auto `               # frame on the speaker; see below
+  --voice-clarity --voice-pitch 0.94 --peak-dbfs -1 `
   --music projects\music-background\"phat phap cung tieng mo.mp4" `
   --music-duck off --music-compress --music-dip-db -5 --music-fade 1.0 `
   --music-window flattest --music-under-db 14 `
@@ -136,6 +137,71 @@ transcript's first sentence, which rarely reads as a hook.
 
 **Captions need `.aive/transcript.json`.** Pass `--no-captions` for a clip with
 no spoken caption.
+
+### Framing the talk: `--talk-zoom auto`
+
+A 16:9 talking head dropped into the centre band arrives with the speaker small
+and often off to one side. Measured across three sources, the face filled
+**0.181, 0.320 and 0.374** of the band's height and sat at x = **0.546, 0.628
+and 0.500** -- so the framing genuinely differs per source and cannot be a
+fixed number.
+
+`auto` samples up to eight frames **from the spans being rendered** (not the
+head of the file -- a talk can change camera part-way), finds the face with
+OpenCV's frontal Haar cascade, and then does two things: zooms until the face
+fills `--talk-face-frac` (default 0.32, which is what the two shipped shorts
+measured at) and recentres so the face sits at x=0.5 and `--talk-face-y`
+(default 0.36, the usual headroom line).
+
+Zoom is clamped to `--talk-zoom-max`, default **1.5**, and never goes below
+1.0 -- zooming out would add the background the zoom exists to remove. The
+dung-so-coi-am source wanted 1.77 and was held at 1.5; raise the cap for a
+source whose speaker is very small, bearing in mind it is an upscale.
+
+If fewer than two sampled frames yield a face the framing is left alone and the
+run says so. Haar is frontal-only, so a speaker who stays in profile will
+legitimately come back empty; that is better than zooming on a guess.
+
+A plain number (`--talk-zoom 1.2`) zooms on the centre of the band instead of
+on the face. It still centres rather than just cropping the middle, because a
+bare crop can cut a speaker who is off to one side in half.
+
+### A landscape cut of the same talk
+
+`--out-w 1920 --out-h 1080` keeps the bands and turns the frame on its side.
+One thing does not carry over: a 16:9 source dropped into a 16:9 frame fills it
+completely, so `talk_h` comes out at the full 1080 and there is no room left
+for either band. Hold the talk down and bring the type with it:
+
+```powershell
+--out-w 1920 --out-h 1080 --talk-h 560 --title-size 52 --caption-size 38
+```
+
+That measured 82px of scene above and 126px below. At `--talk-h 620` the top
+band collapses to 52px, and at the portrait type sizes (78/54) it collapses
+whatever the talk height. The talk band then shows 52% of the source's height,
+which `--talk-zoom auto` frames on the face.
+
+### Changing the pace
+
+`--speed` rescales the picture with `setpts` and the speech with a second
+`atempo` that multiplies with the pitch one. Values above 1 speed up, below 1
+slow down; 1.25 and 0.75 were both rendered from the same spans. Three things
+follow and are handled:
+
+* the caption times are **not** rescaled -- drawtext runs before `setpts`, so
+  the words are rescaled along with the speech and stay in sync;
+* the music bed is mixed in after the speech is rescaled, so it keeps its own
+  tempo and is instead given the output length to cover, which is shorter when
+  speeding up and longer when slowing down;
+* the finished length is `(sum of spans - dissolves) / speed`. Four spans
+  totalling 269.7s with three 0.5s dissolves predicted 214.6s at 1.25 and
+  357.6s at 0.75.
+
+Both atempo stages have to stay inside the filter's 0.5-100 range. With the
+0.94 pitch shift that is already `atempo=1.0638`; at speed 1.25 the pair
+multiply out to 1.33, which is fine, but a large pitch shift and a large speed
+change together would need splitting into more stages.
 
 ### Why each audio flag is there
 
@@ -173,6 +239,18 @@ quá*; **0.94** (-1.06) sits between them and is what new clips use. Measured on
 Going much below 0.90 is a separate problem rather than a matter of taste:
 `asetrate` shifts the formants along with the pitch, so past roughly ten
 percent the voice stops sounding deeper and starts sounding slowed.
+
+`--peak-dbfs -1` puts a ceiling on the finished mix. It is not loudness
+control: on a hot source the clarity chain's makeup plus the bed reached
+**-0.00 dBFS** with two samples at full scale, leaving no headroom at all.
+Measured on that clip, the limiter left 70% of the 100 ms frames untouched,
+reduced 125 of 436 by under 1 dB, and only 5 by more than 1 dB (worst
+-2.75 dB). The overall level did not move at all (-19.90 dB before and after),
+so the measured bed-to-voice ratio still holds.
+
+Note that a limiter breaks the usual way of measuring the bed: `final - twin`
+stops being the bed alone, because the limiter also moved the voice. Measure
+the balance on a render **without** `--peak-dbfs`, then add it.
 
 ### Joining spans with a transition
 

@@ -161,6 +161,22 @@ class Settings:
     # taken from different places in the talk.
     part_transition: str = "cut"
     part_transition_sec: float = 0.5
+    # Ceiling for the finished mix, in dBFS. Zero disables the limiter, which
+    # is what the finished projects were rendered without. A hot source plus
+    # the clarity chain's makeup and the bed reached -0.00 dBFS on one clip.
+    peak_dbfs: float = 0.0
+    # Framing of the talk band. "auto" measures the speaker's face and zooms
+    # until it fills talk_face_frac of the band, recentring on it; a number is
+    # a fixed zoom; 1.0 leaves the framing alone, which is what the finished
+    # projects were rendered with.
+    talk_zoom: str = "1.0"
+    talk_zoom_max: float = 1.5
+    talk_face_frac: float = 0.32
+    talk_face_y: float = 0.36
+    # Playback speed. 0.75 slows everything to three quarters; the picture is
+    # stretched with setpts and the speech with a second atempo, while the bed
+    # keeps its own tempo and is simply given the longer output to cover.
+    speed: float = 1.0
     # Aim the bed this many dB under the measured speech, instead of asking
     # for a raw --music-db. Zero keeps the raw-gain behaviour the finished
     # projects were tuned with.
@@ -359,8 +375,11 @@ def render_clip(
     title_lines: list[str] | None = None,
     cues: list[lc.Cue] | None = None,
     scratch_dir: Path | None = None,
+    zoom_filter: str = "",
+    speed: float = 1.0,
     transition: str = "cut",
     transition_sec: float = 0.5,
+    peak_dbfs: float = 0.0,
     voice_clarity: bool = False,
     voice_pitch: float = 1.0,
     music_compress: bool = False,
@@ -386,6 +405,8 @@ def render_clip(
     # fade and the caption times all read this, not the raw sum.
     overlap = lc.overlap_for(transition, transition_sec) if len(parts) > 1 else 0.0
     dur = sum(p["end"] - p["start"] for p in parts) - overlap * (len(parts) - 1)
+    # The talk is stretched, so the finished clip runs longer than its spans.
+    out_dur = dur / speed if speed else dur
     pre = f"crop={src_crop}," if src_crop else ""
 
     # "top" mirrors only the talk, so a speaker facing left now faces right;
@@ -407,6 +428,7 @@ def render_clip(
             cues=cues or [],
             text_dir=(scratch_dir or shorts_dir / ".scratch") / "text",
             stem=seg["id"],
+            zoom=zoom_filter,
             transition=transition,
             transition_sec=transition_sec,
         )
@@ -427,7 +449,7 @@ def render_clip(
 
     # The talk's own audio is treated before anything is mixed onto it, so
     # the bed's measured level is a level against the treated voice.
-    voice = lc.voice_chain(clarity=voice_clarity, pitch=voice_pitch)
+    voice = lc.voice_chain(clarity=voice_clarity, pitch=voice_pitch, speed=speed)
     if voice:
         pre_audio = f"[speech]{voice}[speechx];"
         speech_label = "[speechx]"
@@ -442,13 +464,13 @@ def render_clip(
         # The music is mastered far hotter than the talk (-9.6 LUFS against
         # -21.7 on this source), so it is cut right down and then ducked
         # against the speech itself -- otherwise it buries the teaching.
-        fade_out = max(0.0, dur - music_fade)
+        fade_out = max(0.0, out_dur - music_fade)
         fmt = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
         if music_compress or music_dip_db:
             shaped = lc.music_chain(
                 gain_db=music_db,
                 fade=music_fade,
-                duration=dur,
+                duration=out_dur,
                 compress=music_compress,
                 dip_hz=music_dip_hz,
                 dip_db=music_dip_db,
@@ -477,6 +499,23 @@ def render_clip(
                 f"[sp][mus]amix=inputs=2:duration=first:normalize=0[aout];"
             )
         audio_map = "[aout]"
+
+    if peak_dbfs:
+        # Last in the chain, after the bed is mixed in: the ceiling has to
+        # govern what actually reaches the encoder, not one contributor to it.
+        # level=disabled stops alimiter normalising the input up to the ceiling
+        # as well as down, which would undo the measured bed-to-voice ratio.
+        limit = 10.0 ** (peak_dbfs / 20.0)
+        src = audio_map
+        audio_chain += f"{src}alimiter=limit={limit:.4f}:level=disabled[alim];"
+        audio_map = "[alim]"
+
+    if abs(speed - 1.0) > 1e-6 and layout == "center":
+        # After the captions are drawn, not before: drawtext's enable times are
+        # on the unstretched clock, and stretching afterwards carries the words
+        # and the speech along together.
+        video_graph += f";{video_label}setpts=PTS/{speed:.6f}[vspd]"
+        video_label = "[vspd]"
 
     if layout == "center":
         # The talk chains, the concat and the whole picture side come from
@@ -514,7 +553,7 @@ def render_clip(
             "-ss",
             f"{music_offset:.3f}",
             "-t",
-            f"{dur:.3f}",
+            f"{out_dur:.3f}",
             "-i",
             str(music),
         ]
@@ -726,6 +765,8 @@ def run(settings: Settings) -> int:
     caption_source: list[dict] = []
     if settings.layout == "center":
         style = lc.CentreStyle(
+            frame_w=settings.out_w,
+            frame_h=settings.out_h,
             font=settings.centre_font,
             title_size=settings.title_size,
             title_lines=settings.title_max_lines,
@@ -735,7 +776,10 @@ def run(settings: Settings) -> int:
         talk_h = settings.talk_h or _talk_height(
             settings.source, settings.src_crop, settings.out_w
         )
-        print(f"layout=center talk={settings.out_w}x{talk_h} font={style.font.name}")
+        print(
+            f"layout=center frame={settings.out_w}x{settings.out_h} "
+            f"talk={settings.out_w}x{talk_h} font={style.font.name}"
+        )
         if settings.captions:
             if not transcript_path.is_file():
                 raise SystemExit(
@@ -759,8 +803,8 @@ def run(settings: Settings) -> int:
         # The height is part of the name too. A full-frame strip and a
         # half-frame one are not interchangeable, and the finished projects
         # must keep reading the file they already built.
-        if bed_h != settings.out_h // 2:
-            bed_name = bed_name.replace(".mp4", f"_h{bed_h}.mp4")
+        if bed_h != settings.out_h // 2 or settings.out_w != 1080:
+            bed_name = bed_name.replace(".mp4", f"_{settings.out_w}x{bed_h}.mp4")
         bed = build_bed(
             brolls,
             cache / bed_name,
@@ -862,6 +906,48 @@ def run(settings: Settings) -> int:
             for note in geom.notes:
                 print(f"  NOTE {note}")
 
+        # Framing is measured on this clip's own spans, not on the head of the
+        # file: a talk can change camera or seating part-way through, and the
+        # frames that matter are the ones being rendered.
+        zoom_filter = ""
+        if style is not None and settings.talk_zoom != "1.0":
+            spans = seg.get("parts") or [{"start": seg["start"], "end": seg["end"]}]
+            times = []
+            for part in spans:
+                lo, hi = float(part["start"]), float(part["end"])
+                times += [lo + (hi - lo) * f for f in (0.15, 0.4, 0.65, 0.9)]
+            if settings.talk_zoom == "auto":
+                fr = lc.measure_face(
+                    ffmpeg,
+                    settings.source,
+                    src_crop=settings.src_crop,
+                    talk_h=talk_h,
+                    times=times[:8],
+                    frame_w=settings.out_w,
+                    target_frac=settings.talk_face_frac,
+                    zoom_max=settings.talk_zoom_max,
+                )
+                if fr is None:
+                    print("  no face found; framing left alone")
+                else:
+                    zoom_filter = lc.zoom_filter(
+                        zoom=fr.zoom, face_x=fr.face_x, face_y=fr.face_y,
+                        talk_h=talk_h, place_y=settings.talk_face_y,
+                        frame_w=settings.out_w,
+                    )
+                    print(
+                        f"  face {fr.frames_found}/{fr.frames_tried} frames: "
+                        f"x{fr.face_x:.2f} y{fr.face_y:.2f} h{fr.face_frac:.2f}"
+                        f" -> zoom {fr.zoom:.2f}"
+                    )
+            else:
+                # A fixed zoom still centres, because a number alone would
+                # crop the middle and can cut the speaker in half.
+                zoom_filter = lc.zoom_filter(
+                    zoom=float(settings.talk_zoom), face_x=0.5, face_y=0.5,
+                    talk_h=talk_h, place_y=0.5, frame_w=settings.out_w,
+                )
+
         out_clip = shorts_dir / f"{seg['id']}.mp4"
         out_thumb = shorts_dir / f"{seg['id']}.jpg"
         print(f"[{i + 1}/{len(segs)}] render {seg['id']} + {broll.name}")
@@ -883,8 +969,11 @@ def run(settings: Settings) -> int:
                     flip=settings.flip,
                     layout=settings.layout,
                     scratch_dir=cache,
+                    zoom_filter=zoom_filter,
+                    speed=settings.speed,
                     transition=settings.part_transition,
                     transition_sec=settings.part_transition_sec,
+                    peak_dbfs=settings.peak_dbfs,
                     geom=geom,
                     style=clip_style,
                     title_lines=title_lines,
@@ -1073,6 +1162,41 @@ def main(argv: list[str] | None = None) -> int:
         help="Put the bed this many dB under the measured speech, e.g. 14. Overrides --music-db.",
     )
     parser.add_argument(
+        "--speed",
+        type=float,
+        default=1.0,
+        help="Playback speed, e.g. 0.75 for three-quarter speed. Pitch is preserved.",
+    )
+    parser.add_argument("--out-w", type=int, default=1080)
+    parser.add_argument(
+        "--out-h", type=int, default=1920,
+        help="Frame size. 1920x1080 gives the same bands in a landscape frame.",
+    )
+    parser.add_argument(
+        "--talk-zoom",
+        default="1.0",
+        help='Zoom on the talk: a number, or "auto" to measure the face and frame on it.',
+    )
+    parser.add_argument("--talk-zoom-max", type=float, default=1.5)
+    parser.add_argument(
+        "--talk-face-frac",
+        type=float,
+        default=0.32,
+        help="Fraction of the talk band's height the face should fill under --talk-zoom auto.",
+    )
+    parser.add_argument(
+        "--talk-face-y",
+        type=float,
+        default=0.36,
+        help="Where the face centre sits vertically in the band, 0=top 1=bottom.",
+    )
+    parser.add_argument(
+        "--peak-dbfs",
+        type=float,
+        default=0.0,
+        help="Ceiling for the finished mix, e.g. -1. Zero leaves the mix unlimited.",
+    )
+    parser.add_argument(
         "--part-transition",
         choices=("cut", "fade", "dissolve", "fadeblack", "wipeleft", "smoothleft"),
         default="cut",
@@ -1188,6 +1312,14 @@ def main(argv: list[str] | None = None) -> int:
         music_dip_hz=args.music_dip_hz,
         music_dip_db=args.music_dip_db,
         music_window=args.music_window,
+        peak_dbfs=args.peak_dbfs,
+        talk_zoom=args.talk_zoom,
+        talk_zoom_max=args.talk_zoom_max,
+        talk_face_frac=args.talk_face_frac,
+        talk_face_y=args.talk_face_y,
+        speed=args.speed,
+        out_w=args.out_w,
+        out_h=args.out_h,
         part_transition=args.part_transition,
         part_transition_sec=args.part_transition_sec,
         music_under_db=args.music_under_db,
