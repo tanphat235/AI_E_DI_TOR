@@ -123,6 +123,7 @@ The recipe, with the numbers that were measured rather than chosen:
   --layout center `
   --flip top `                     # mirrors the talk only; text is drawn after
   --talk-zoom auto `               # frame on the speaker; see below
+  --part-transition dissolve --part-transition-sec 0.5 `
   --voice-clarity --voice-pitch 0.94 --peak-dbfs -1 `
   --music projects\music-background\"phat phap cung tieng mo.mp4" `
   --music-duck off --music-compress --music-dip-db -5 --music-fade 1.0 `
@@ -253,6 +254,20 @@ stops being the bed alone, because the limiter also moved the voice. Measure
 the balance on a render **without** `--peak-dbfs`, then add it.
 
 ### Joining spans with a transition
+
+**This is part of the centre format.** When the user says "format center",
+every junction of a multi-part clip gets a 0.5 s dissolve, as in
+`projects/van-dap-tinh-yeu/cut1.py`. That was settled on 2026-09-22 and
+reverses an earlier instruction to use plain cuts -- do not switch back on your
+own.
+
+**Tell them the arithmetic when they give exact times.** A dissolve consumes
+its length from *both* sides, so a clip finishes at
+`sum of spans - 0.5 x number of junctions`. Ten spans totalling 220.1 s came
+out at 215.6 s, and that 4.5 s shortfall is what made an earlier batch need
+re-exporting. If a span must survive intact to the second, say so and the
+junction has to be a plain `cut`.
+
 
 `--part-transition dissolve --part-transition-sec 0.5` cross-fades between the
 spans of a multi-part clip instead of hard-cutting. Use it when the spans come
