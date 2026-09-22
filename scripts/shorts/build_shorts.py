@@ -197,6 +197,11 @@ class Settings:
     thumb_size: int = 84
     thumb_lines: int = 3
     thumb_margin: int = 150
+    # auto: draw the headline only when the frame does not already carry
+    # one, i.e. never in the centre layout. A long landscape video needs it
+    # anyway -- its burned-in title is 52px, which is unreadable at the size
+    # YouTube shows a thumbnail.
+    thumb_headline: str = "auto"
     # Sidechain ducking makes the bed rise and fall with the speech, which is
     # audible as pumping. Off holds one constant level for the whole clip.
     # Threshold is linear amplitude: speech sits near 0.08 and room tone near
@@ -1012,7 +1017,11 @@ def run(settings: Settings) -> int:
                     size=settings.thumb_size,
                     max_lines=settings.thumb_lines,
                     margin=settings.thumb_margin,
-                    headline=settings.layout != "center",
+                    headline=(
+                        settings.thumb_headline == "on"
+                        or (settings.thumb_headline == "auto"
+                            and settings.layout != "center")
+                    ),
                 )
             rendered.append(
                 {
@@ -1055,6 +1064,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--thumb-color", default="0xFFD24A", help="Headline colour.")
     parser.add_argument("--thumb-size", type=int, default=84)
+    parser.add_argument(
+        "--thumb-headline",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help="Draw the headline on the thumbnail. auto = only when the frame lacks one.",
+    )
     parser.add_argument("--thumb-lines", type=int, default=3)
     parser.add_argument(
         "--thumb-margin", type=int, default=150,
@@ -1285,6 +1300,7 @@ def main(argv: list[str] | None = None) -> int:
         thumb_font=args.thumb_font,
         thumb_color=args.thumb_color,
         thumb_size=args.thumb_size,
+        thumb_headline=args.thumb_headline,
         thumb_lines=args.thumb_lines,
         thumb_margin=args.thumb_margin,
         limit=args.limit,
