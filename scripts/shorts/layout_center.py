@@ -527,7 +527,15 @@ def video_graph(
     chains: list[str] = []
 
     for i in range(len(parts)):
-        pre = erase + (f"crop={src_crop}," if src_crop else "")
+        # A part may carry its own crop. A talk shot with more than one camera
+        # setup cannot be framed by one box: this one cuts from a close seated
+        # shot to a wide hall in which the speaker is a small figure at the
+        # bottom, and a crop that frames either one loses him entirely in the
+        # other. crop's own w/h cannot be animated -- the filter's output size
+        # is fixed -- so the switch has to happen per part, which is where the
+        # graph already branches.
+        part_crop = str(parts[i].get("crop") or src_crop)
+        pre = erase + (f"crop={part_crop}," if part_crop else "")
         # setpts resets each part's clock to zero: xfade reads its offset on
         # the first input's own timeline, and a part cut with -ss carries the
         # source's timestamps unless they are reset.
