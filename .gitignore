@@ -15,6 +15,10 @@ venv/
 htmlcov/
 coverage.xml
 
+# Hugging Face model cache for scripts/aivideo. Tens of GB of weights, and every
+# byte of it is re-downloadable from the model id in the script.
+.hf-cache/
+
 # AIVE project data. Media and derived artefacts never belong in git: raw footage
 # is large and binary, and everything under .aive/ or output/ is reproducible from
 # the inputs plus an Edit Plan.
