@@ -76,19 +76,30 @@ def main() -> int:
     style = lc.CentreStyle(frame_w=FRAME_W, frame_h=FRAME_H, caption_size=46)
     total = spans[-1]["end"]
 
+    # A shot runs from its own line's start to the *next* line's start, not to
+    # its own end: the small silences between lines have to be covered by
+    # something, and holding the picture that is already up is what an editor
+    # would do. The first shot starts at 0 and the last runs to the end, so the
+    # concatenated picture is exactly as long as the narration and the captions
+    # cannot drift against it.
+    bounds = [0.0] + [s["start"] for s in spans[1:]] + [total]
+
     ff = imageio_ffmpeg.get_ffmpeg_exe()
     cmd = [ff, "-y"]
     chains = []
-    for i, (img, span) in enumerate(zip(images, spans, strict=True)):
-        dur = max(0.4, span["end"] - span["start"])
+    for i, img in enumerate(images):
+        dur = max(0.4, bounds[i + 1] - bounds[i])
         frames = max(1, int(round(dur * FPS)))
-        cmd += ["-loop", "1", "-t", f"{dur:.3f}", "-i", str(img)]
-        # zoompan works on the frame it is given, so the still is scaled up
-        # first and cropped back; zooming a 1920-wide source directly makes the
-        # ink shimmer.
+        # -framerate must match FPS and zoompan must take d=1. Given a
+        # multi-frame input, zoompan emits `d` frames for *each* one, so the
+        # first shot alone became six minutes long and -t cropped the video to
+        # that single picture -- 62 s of narration over one still.
+        cmd += ["-loop", "1", "-framerate", str(FPS), "-t", f"{dur:.3f}", "-i", str(img)]
+        # The still is scaled up first and cropped back; zooming a 1920-wide
+        # source directly makes the ink shimmer.
         chains.append(
             f"[{i}:v]scale={FRAME_W * 2}:{FRAME_H * 2},"
-            f"zoompan=z='1+{ZOOM - 1:.4f}*on/{frames}':d={frames}"
+            f"zoompan=z='1+{ZOOM - 1:.4f}*on/{frames}':d=1"
             f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":s={FRAME_W}x{FRAME_H}:fps={FPS},setsar=1[s{i}]"
         )
