@@ -107,6 +107,11 @@ class Settings:
     # "w:h:x:y" applied to the talk before framing, to drop baked-on
     # decoration such as a pillarbox border or a scrolling promo banner.
     src_crop: str = ""
+    # Boxes to paint out before the crop, each "w:h:x:y" in source
+    # pixels. For a mark the crop cannot avoid: delogo interpolates from
+    # the box edge, so it suits small text over flat background and not a
+    # block over the speaker.
+    src_delogo: tuple[str, ...] = ()
     # Read .aive/answer_segments.json instead of re-deriving chapters, so a
     # purpose-built segmenter (see segment_qa.py) can own the cut points.
     reuse_segments: bool = False
@@ -140,6 +145,12 @@ class Settings:
     title_max_lines: int = 2
     caption_size: int = 54
     caption_max_lines: int = 2
+    # Channel handle drawn in the caption's place when captions are off.
+    channel_tag: str = ""
+    # Re-render clips that already exist. Skipping them is right while
+    # adding segments to a project and wrong after a format change, which
+    # leaves the old files looking freshly made.
+    overwrite: bool = False
     # Clean up the talk's own audio: rumble out, low-mid mud down, consonant
     # band up, gentle levelling. Off by default so finished projects are
     # unaffected.
@@ -372,6 +383,7 @@ def render_clip(
     out_w: int,
     out_h: int,
     src_crop: str = "",
+    src_delogo: tuple[str, ...] = (),
     bed_offset: float | None = None,
     flip: str = "none",
     layout: str = "half",
@@ -381,6 +393,7 @@ def render_clip(
     cues: list[lc.Cue] | None = None,
     scratch_dir: Path | None = None,
     zoom_filter: str = "",
+    channel_tag: str = "",
     speed: float = 1.0,
     transition: str = "cut",
     transition_sec: float = 0.5,
@@ -426,6 +439,7 @@ def render_clip(
             parts=parts,
             broll_index=len(parts),
             src_crop=src_crop,
+            src_delogo=src_delogo,
             flip=flip,
             geom=geom,
             style=style,
@@ -436,6 +450,7 @@ def render_clip(
             zoom=zoom_filter,
             transition=transition,
             transition_sec=transition_sec,
+            tag=channel_tag,
         )
     else:
         video_graph = video_label = ""
@@ -769,14 +784,20 @@ def run(settings: Settings) -> int:
     talk_h = 0
     caption_source: list[dict] = []
     if settings.layout == "center":
+        # A tag is one short line, so the strip under the talk is sized for
+        # one line at tag size. Sized as a two-line caption block it would
+        # leave a tall empty scrim and take that height from the bottom scene
+        # band for nothing.
+        tag_only = bool(settings.channel_tag) and not settings.captions
+        base = lc.CentreStyle()
         style = lc.CentreStyle(
             frame_w=settings.out_w,
             frame_h=settings.out_h,
             font=settings.centre_font,
             title_size=settings.title_size,
             title_lines=settings.title_max_lines,
-            caption_size=settings.caption_size,
-            caption_lines=settings.caption_max_lines,
+            caption_size=base.tag_size if tag_only else settings.caption_size,
+            caption_lines=1 if tag_only else settings.caption_max_lines,
         )
         talk_h = settings.talk_h or _talk_height(
             settings.source, settings.src_crop, settings.out_w
@@ -845,7 +866,14 @@ def run(settings: Settings) -> int:
             voice = lc.voice_chain(
                 clarity=settings.voice_clarity, pitch=settings.voice_pitch
             )
-            spans = [(float(s["start"]), float(s["end"])) for s in segs]
+            # The parts, not start/end. A clip whose parts are not in
+            # chronological order -- which is allowed, and which the user asks
+            # for -- has start after end, and that span measures nothing.
+            spans = [
+                (float(p["start"]), float(p["end"]))
+                for s in segs
+                for p in (s.get("parts") or [{"start": s["start"], "end": s["end"]}])
+            ]
             speech_db = lc.speech_level_db(ffmpeg, settings.source, spans, chain=voice)
             music_db_eff = speech_db - settings.music_under_db - shaped_db
             print(
@@ -917,17 +945,25 @@ def run(settings: Settings) -> int:
         zoom_filter = ""
         if style is not None and settings.talk_zoom != "1.0":
             spans = seg.get("parts") or [{"start": seg["start"], "end": seg["end"]}]
+            # Sample by length, not four points per part. A one-part clip got
+            # four frames however long it was, and Haar is frontal-only, so a
+            # 707 s talk in which the speaker is turned away in two of those
+            # four fell below the two-frame minimum and was reported as having
+            # no face at all -- the framing was then left wrong. One sample per
+            # eight seconds, at least six per part, capped so the cost stays
+            # bounded on a long talk.
             times = []
             for part in spans:
                 lo, hi = float(part["start"]), float(part["end"])
-                times += [lo + (hi - lo) * f for f in (0.15, 0.4, 0.65, 0.9)]
+                n = max(6, min(24, int((hi - lo) / 8)))
+                times += [lo + (hi - lo) * (k + 0.5) / n for k in range(n)]
             if settings.talk_zoom == "auto":
                 fr = lc.measure_face(
                     ffmpeg,
                     settings.source,
                     src_crop=settings.src_crop,
                     talk_h=talk_h,
-                    times=times[:8],
+                    times=times[:40],
                     frame_w=settings.out_w,
                     target_frac=settings.talk_face_frac,
                     zoom_max=settings.talk_zoom_max,
@@ -957,7 +993,11 @@ def run(settings: Settings) -> int:
         out_thumb = shorts_dir / f"{seg['id']}.jpg"
         print(f"[{i + 1}/{len(segs)}] render {seg['id']} + {broll.name}")
         try:
-            if out_clip.is_file() and out_clip.stat().st_size > 10000:
+            if (
+                not settings.overwrite
+                and out_clip.is_file()
+                and out_clip.stat().st_size > 10000
+            ):
                 clip = out_clip
                 print("  skip existing clip")
             else:
@@ -970,11 +1010,13 @@ def run(settings: Settings) -> int:
                     out_w=settings.out_w,
                     out_h=settings.out_h,
                     src_crop=settings.src_crop,
+                    src_delogo=settings.src_delogo,
                     bed_offset=offset,
                     flip=settings.flip,
                     layout=settings.layout,
                     scratch_dir=cache,
                     zoom_filter=zoom_filter,
+                    channel_tag=settings.channel_tag,
                     speed=settings.speed,
                     transition=settings.part_transition,
                     transition_sec=settings.part_transition_sec,
@@ -1001,7 +1043,11 @@ def run(settings: Settings) -> int:
                     duck_ratio=settings.music_duck_ratio,
                     duck_release=settings.music_duck_release,
                 )
-            if out_thumb.is_file() and out_thumb.stat().st_size > 1000:
+            if (
+                not settings.overwrite
+                and out_thumb.is_file()
+                and out_thumb.stat().st_size > 1000
+            ):
                 thumb = out_thumb
                 print("  skip existing thumb")
             else:
@@ -1140,6 +1186,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--title-size", type=int, default=78)
     parser.add_argument("--title-max-lines", type=int, default=2)
+    parser.add_argument(
+        "--src-delogo",
+        action="append",
+        default=[],
+        metavar="W:H:X:Y",
+        help="Paint out a burned-in mark before cropping. Repeatable.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Re-render clips that already exist instead of keeping them.",
+    )
+    parser.add_argument(
+        "--channel-tag",
+        default="",
+        help="Handle drawn where the caption would be, e.g. @mychannel. Centre layout with --no-captions.",
+    )
     parser.add_argument("--caption-size", type=int, default=54)
     parser.add_argument("--caption-max-lines", type=int, default=2)
     parser.add_argument(
@@ -1320,6 +1383,9 @@ def main(argv: list[str] | None = None) -> int:
         centre_font=args.centre_font,
         title_size=args.title_size,
         title_max_lines=args.title_max_lines,
+        src_delogo=tuple(args.src_delogo),
+        overwrite=args.overwrite,
+        channel_tag=args.channel_tag,
         caption_size=args.caption_size,
         caption_max_lines=args.caption_max_lines,
         voice_clarity=args.voice_clarity,

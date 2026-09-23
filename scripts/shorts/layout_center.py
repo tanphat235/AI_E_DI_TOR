@@ -61,6 +61,11 @@ class CentreStyle:
     caption_color: str = "0xF9FE0B"
     caption_size: int = 54
     caption_lines: int = 2
+    # A channel handle drawn where the caption would be, for clips that carry no
+    # caption. Smaller than a caption because it is a mark, not something to
+    # read along with, but the same yellow so the frame still looks like the
+    # channel's.
+    tag_size: int = 44
     # Vietnamese stacks diacritics above the cap line, so it needs more leading
     # than Latin text. The reference's baseline pitch was 95 px at size 78 and
     # 62 px at 54, i.e. 1.22 and 1.15; 1.25 clears the tallest stack.
@@ -447,6 +452,7 @@ def video_graph(
     parts: list[dict],
     broll_index: int,
     src_crop: str,
+    src_delogo: tuple[str, ...] = (),
     flip: str,
     geom: Geometry,
     style: CentreStyle,
@@ -457,6 +463,7 @@ def video_graph(
     zoom: str = "",
     transition: str = "cut",
     transition_sec: float = 0.5,
+    tag: str = "",
 ) -> tuple[str, str]:
     """Filter graph for the centre layout, plus the label carrying the picture.
 
@@ -466,6 +473,12 @@ def video_graph(
     mistake this ordering exists to avoid.
     """
     text_dir.mkdir(parents=True, exist_ok=True)
+    # delogo before crop, because the boxes are read off the source frame and
+    # that is the only coordinate system a person can measure them in.
+    erase = "".join(
+        f"delogo=x={b[2]}:y={b[3]}:w={b[0]}:h={b[1]},"
+        for b in (tuple(int(v) for v in box.split(":")) for box in src_delogo)
+    )
     talk_flip = "hflip," if flip == "top" else ""
     # Zoom before the flip: the face was measured on the unflipped band, so the
     # crop offset is in unflipped coordinates.
@@ -473,7 +486,7 @@ def video_graph(
     chains: list[str] = []
 
     for i in range(len(parts)):
-        pre = f"crop={src_crop}," if src_crop else ""
+        pre = erase + (f"crop={src_crop}," if src_crop else "")
         # setpts resets each part's clock to zero: xfade reads its offset on
         # the first input's own timeline, and a part cut with -ss carries the
         # source's timestamps unless they are reset.
@@ -525,6 +538,31 @@ def video_graph(
             slots=len(title),
             text_dir=text_dir,
             stem=f"{stem}_title",
+        )
+
+    # The channel handle sits in the caption's place and is never timed: it is a
+    # mark on the frame, not a line of speech. It is drawn instead of captions,
+    # not beside them, so nothing has to arbitrate the same strip.
+    if tag and not cues:
+        draws.append(
+            _plate(
+                style=style,
+                size=style.caption_size,
+                top=geom.caption_top,
+                line_h=geom.caption_line_h,
+                slots=1,
+            )
+        )
+        draws += _text_block(
+            lines=[tag],
+            style=style,
+            size=style.caption_size,
+            colors=(style.caption_color,),
+            top=geom.caption_top,
+            line_h=geom.caption_line_h,
+            slots=1,
+            text_dir=text_dir,
+            stem=f"{stem}_tag",
         )
 
     # One plate per contiguous run of captions, not one per cue: the box would
@@ -758,7 +796,7 @@ def speech_level_db(
     import numpy as np
 
     if not spans:
-        return 0.0
+        raise ValueError("speech_level_db got no spans")
     per = max(4.0, budget / len(spans))
     chunks = []
     for start, end in spans:
@@ -767,7 +805,15 @@ def speech_level_db(
             continue
         chunks.append(_decode_mono(ffmpeg, source, start=start, dur=take, rate=48000, chain=chain))
     if not chunks:
-        return 0.0
+        # Never fall back to a number. 0.0 dB is a *plausible* level, so the
+        # caller cannot tell it apart from a real measurement -- and it is about
+        # 11 dB above real speech, which put the bed 2.5 dB under the voice
+        # instead of the 14 dB asked for. That shipped, and it was only found by
+        # measuring the pause floor of the finished file. Fail instead.
+        raise ValueError(
+            f"no usable audio in {len(spans)} span(s): {spans!r}. "
+            "A span shorter than 1 s or running backwards yields nothing."
+        )
     x = np.concatenate(chunks)
     hop = 4800  # 100 ms
     frames = x[: (len(x) // hop) * hop].reshape(-1, hop)
