@@ -189,7 +189,13 @@ def wrap(
     return best
 
 
-def geometry(*, talk_h: int, title_line_count: int, style: CentreStyle) -> Geometry:
+def geometry(
+    *,
+    talk_h: int,
+    title_line_count: int,
+    style: CentreStyle,
+    edges: bool = False,
+) -> Geometry:
     """Place the talk centred, then hang the title above it and the caption below.
 
     The talk is centred rather than pinned so both scene bands survive: with a
@@ -197,22 +203,57 @@ def geometry(*, talk_h: int, title_line_count: int, style: CentreStyle) -> Geome
     9:8 crop (960 px) still 208 and 283 px. A talk taller than about 1250 px
     leaves no room for a scene band, which is why ``notes`` reports the
     remaining heights for the caller to print.
+
+    ``edges`` is the other arrangement: the title sits flush against the top of
+    the frame, the caption or tag flush against the bottom, and the talk takes
+    **all** the height between them -- ``talk_h`` is derived, not taken. There
+    are then no separate scene bands; the scene shows through the two text
+    plates, which are translucent, and nowhere else.
+
+    That is what a 16:9 frame wants. A portrait frame is tall enough to give a
+    scene band above and below and still leave the talk half the height, but in
+    landscape the same arrangement left the talk a 560 px strip in a 1080 px
+    frame with two wide bands of unrelated stock footage around it, which is
+    what the user saw and called odd.
     """
     title_line_h = int(style.title_size * style.line_ratio)
     caption_line_h = int(style.caption_size * style.line_ratio)
     title_pad = int(style.title_size * style.pad_ratio)
     caption_pad = int(style.caption_size * style.pad_ratio)
 
-    talk_y = (style.frame_h - talk_h) // 2
     title_block = title_line_h * max(1, title_line_count) + 2 * title_pad
+    caption_block = caption_line_h * style.caption_lines + 2 * caption_pad
+
+    notes: list[str] = []
+    if edges:
+        talk_h = max(2, (style.frame_h - title_block - caption_block) // 2 * 2)
+        talk_y = title_block
+        title_top = title_pad
+        caption_top = style.frame_h - caption_block + caption_pad
+        # The plates are the scene: it is visible through them and nowhere else.
+        scene_top_h = title_block
+        scene_bottom_h = caption_block
+        if talk_h < style.frame_h // 2:
+            notes.append(f"talk is only {talk_h}px of {style.frame_h}; the text blocks are large")
+        return Geometry(
+            talk_h=talk_h,
+            talk_y=talk_y,
+            title_top=title_top,
+            title_line_h=title_line_h,
+            caption_top=caption_top,
+            caption_line_h=caption_line_h,
+            scene_top_h=scene_top_h,
+            scene_bottom_h=scene_bottom_h,
+            notes=tuple(notes),
+        )
+
+    talk_y = (style.frame_h - talk_h) // 2
     title_top = talk_y - style.gap - title_block + title_pad
     caption_top = talk_y + talk_h + style.gap + caption_pad
 
     scene_top_h = max(0, title_top - title_pad)
-    caption_block = caption_line_h * style.caption_lines + 2 * caption_pad
     scene_bottom_h = max(0, style.frame_h - (caption_top - caption_pad + caption_block))
 
-    notes: list[str] = []
     if scene_top_h < 80:
         notes.append(f"top scene band is only {scene_top_h}px; lower --talk-h to widen it")
     if scene_bottom_h < 80:

@@ -112,6 +112,9 @@ class Settings:
     # the box edge, so it suits small text over flat background and not a
     # block over the speaker.
     src_delogo: tuple[str, ...] = ()
+    # Title flush to the top of the frame, tag flush to the bottom, talk
+    # filling everything between. Derives talk_h, so --talk-h is ignored.
+    text_edges: bool = False
     # Read .aive/answer_segments.json instead of re-deriving chapters, so a
     # purpose-built segmenter (see segment_qa.py) can own the cut points.
     reuse_segments: bool = False
@@ -802,9 +805,12 @@ def run(settings: Settings) -> int:
         talk_h = settings.talk_h or _talk_height(
             settings.source, settings.src_crop, settings.out_w
         )
+        # In edges mode the band height comes from geometry, per clip, so the
+        # setting printed here would be a number the render never uses.
+        band = "derived per clip (--text-edges)" if settings.text_edges else f"{settings.out_w}x{talk_h}"
         print(
             f"layout=center frame={settings.out_w}x{settings.out_h} "
-            f"talk={settings.out_w}x{talk_h} font={style.font.name}"
+            f"talk={band} font={style.font.name}"
         )
         if settings.captions:
             if not transcript_path.is_file():
@@ -918,8 +924,17 @@ def run(settings: Settings) -> int:
             if clip_style.title_size != style.title_size:
                 print(f"  title set at {clip_style.title_size}px so the words break cleanly")
             geom = lc.geometry(
-                talk_h=talk_h, title_line_count=len(title_lines), style=clip_style
+                talk_h=talk_h,
+                title_line_count=len(title_lines),
+                style=clip_style,
+                edges=settings.text_edges,
             )
+            # In edges mode the band height is derived, and the face has to be
+            # measured against the band that will actually be drawn.
+            talk_h = geom.talk_h
+            if settings.text_edges:
+                print(f"  talk band {settings.out_w}x{talk_h}, "
+                      f"{talk_h / settings.out_h * 100:.0f}% of the frame")
             if caption_source:
                 clip_parts = seg.get("parts") or [
                     {"start": seg["start"], "end": seg["end"]}
@@ -1187,6 +1202,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--title-size", type=int, default=78)
     parser.add_argument("--title-max-lines", type=int, default=2)
     parser.add_argument(
+        "--text-edges",
+        action="store_true",
+        help="Title against the top of the frame, tag against the bottom, talk filling the rest. Ignores --talk-h.",
+    )
+    parser.add_argument(
         "--src-delogo",
         action="append",
         default=[],
@@ -1383,6 +1403,7 @@ def main(argv: list[str] | None = None) -> int:
         centre_font=args.centre_font,
         title_size=args.title_size,
         title_max_lines=args.title_max_lines,
+        text_edges=args.text_edges,
         src_delogo=tuple(args.src_delogo),
         overwrite=args.overwrite,
         channel_tag=args.channel_tag,
