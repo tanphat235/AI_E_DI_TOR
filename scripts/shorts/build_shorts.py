@@ -154,6 +154,9 @@ class Settings:
     # adding segments to a project and wrong after a format change, which
     # leaves the old files looking freshly made.
     overwrite: bool = False
+    # Remake the thumbnail and leave the clip alone. Re-encoding a
+    # twelve-minute talk to change a JPEG is the wrong trade.
+    thumb_only: bool = False
     # Clean up the talk's own audio: rumble out, low-mid mud down, consonant
     # band up, gentle levelling. Off by default so finished projects are
     # unaffected.
@@ -211,6 +214,9 @@ class Settings:
     thumb_size: int = 84
     thumb_lines: int = 3
     thumb_margin: int = 150
+    # Where the headline block sits: bottom (the shorts default), center
+    # or top. A landscape thumbnail wants it centred.
+    thumb_pos: str = "bottom"
     # auto: draw the headline only when the frame does not already carry
     # one, i.e. never in the centre layout. A long landscape video needs it
     # anyway -- its burned-in title is 52px, which is unreadable at the size
@@ -638,6 +644,53 @@ def _wrap_headline(text: str, *, font_size: int, width_px: int, max_lines: int) 
     return lines or [""]
 
 
+def _fit_headline(
+    text: str,
+    *,
+    ffmpeg: Path,
+    font: Path,
+    max_size: int,
+    width_px: int,
+    max_lines: int,
+    scratch: Path,
+) -> tuple[list[str], int]:
+    """Largest size at which the headline fits the width, and its lines.
+
+    The estimate _wrap_headline uses -- 0.52 em a glyph -- is too small for
+    Arial Bold caps carrying Vietnamese diacritics, and nothing checked the
+    result, so a headline simply ran off both edges of the thumbnail. Widths are
+    measured here with the same ffmpeg pass layout_center uses for titles, and
+    drawn width scales linearly with fontsize, so one measurement answers every
+    candidate size.
+
+    Every split into 1..max_lines balanced lines is tried and the one that
+    allows the biggest type wins, which is what "big and balanced" means on a
+    thumbnail: two even lines beat one long line and a stub.
+    """
+    tokens = " ".join(text.split()).split(" ")
+    if not tokens:
+        return [""], max_size
+    widths, space = lc._token_widths(ffmpeg, font, max_size, tokens, scratch)
+
+    best: tuple[int, list[str]] = (0, [text])
+    for n in range(1, max_lines + 1):
+        for split in lc._splits(len(tokens), n):
+            groups, at = [], 0
+            for count in split:
+                groups.append(tokens[at : at + count])
+                at += count
+            widest = max(
+                sum(widths[t] for t in g) + space * (len(g) - 1) for g in groups
+            )
+            if widest <= 0:
+                continue
+            # Widths were measured at max_size, so this is the size that fits.
+            fits = min(max_size, int(max_size * width_px / widest))
+            if fits > best[0]:
+                best = (fits, [" ".join(g) for g in groups])
+    return best[1], best[0]
+
+
 def make_thumbnail(
     seg: dict,
     clip: Path,
@@ -652,6 +705,8 @@ def make_thumbnail(
     max_lines: int,
     margin: int,
     headline: bool = True,
+    position: str = "bottom",
+    crop: str = "",
 ) -> Path:
     """A frame from the clip with a gold headline over the lower, B-roll half.
 
@@ -690,21 +745,47 @@ def make_thumbnail(
     text = str(seg.get("thumb_text") or seg.get("title") or seg["id"]).strip()
     if not font.is_file():
         font = Path(r"C:/Windows/Fonts/arial.ttf")
-    lines = _wrap_headline(
-        text, font_size=size, width_px=1080 - 2 * 60, max_lines=max_lines
+
+    # The frame's real size, not the portrait defaults. These were 1080 and 1920
+    # written in, so on a 1920x1080 thumbnail the block was placed at y=1432 --
+    # off the bottom of a 1080-tall image -- and no headline appeared at all,
+    # however large --thumb-size was set. The wrap width was half the frame too.
+    fw, fh = _video_size(frame)
+
+    # The clip already carries the title and the tag burned in. Cropping to the
+    # talk band drops both, so the headline is not drawn over a smaller copy of
+    # itself, and gives the picture the whole thumbnail.
+    pre = ""
+    if crop:
+        pre = (f"crop={crop},scale={fw}:{fh}:force_original_aspect_ratio=increase,"
+               f"crop={fw}:{fh},")
+
+    lines, size = _fit_headline(
+        text,
+        ffmpeg=ffmpeg,
+        font=font,
+        max_size=size,
+        width_px=fw - 2 * 60,
+        max_lines=max_lines,
+        scratch=shorts_dir / ".scratch" / "thumbfit",
     )
 
     # Vietnamese stacks diacritics, so it needs more leading than Latin text.
     line_h = int(size * 1.30)
     block_h = line_h * len(lines)
-    top = max(0, 1920 - margin - block_h)
     pad = int(size * 0.35)
+    if position == "center":
+        top = max(pad, (fh - block_h) // 2)
+    elif position == "top":
+        top = margin + pad
+    else:
+        top = max(pad, fh - margin - block_h)
 
     # One drawtext per line, each centred on its own width. Passing all the
     # lines as a single multi-line textfile centres the block but left-aligns
     # the lines inside it, so a short last line hangs off to one side.
     draws = [
-        f"drawbox=x=0:y={top - pad}:w=iw:h={block_h + 2 * pad}:color=black@0.55:t=fill"
+        pre + f"drawbox=x=0:y={top - pad}:w=iw:h={block_h + 2 * pad}:color=black@0.55:t=fill"
     ]
     line_files: list[Path] = []
     for i, line in enumerate(lines):
@@ -1009,7 +1090,7 @@ def run(settings: Settings) -> int:
         print(f"[{i + 1}/{len(segs)}] render {seg['id']} + {broll.name}")
         try:
             if (
-                not settings.overwrite
+                (settings.thumb_only or not settings.overwrite)
                 and out_clip.is_file()
                 and out_clip.stat().st_size > 10000
             ):
@@ -1060,6 +1141,7 @@ def run(settings: Settings) -> int:
                 )
             if (
                 not settings.overwrite
+                and not settings.thumb_only
                 and out_thumb.is_file()
                 and out_thumb.stat().st_size > 1000
             ):
@@ -1078,6 +1160,13 @@ def run(settings: Settings) -> int:
                     size=settings.thumb_size,
                     max_lines=settings.thumb_lines,
                     margin=settings.thumb_margin,
+                    position=settings.thumb_pos,
+                    # Drop the burned-in title and tag from the thumbnail.
+                    crop=(
+                        f"{settings.out_w}:{geom.talk_h}:0:{geom.talk_y}"
+                        if geom is not None and settings.thumb_headline == "on"
+                        else ""
+                    ),
                     headline=(
                         settings.thumb_headline == "on"
                         or (settings.thumb_headline == "auto"
@@ -1125,6 +1214,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--thumb-color", default="0xFFD24A", help="Headline colour.")
     parser.add_argument("--thumb-size", type=int, default=84)
+    parser.add_argument(
+        "--thumb-pos",
+        choices=["bottom", "center", "top"],
+        default="bottom",
+        help="Where the thumbnail headline sits.",
+    )
     parser.add_argument(
         "--thumb-headline",
         choices=("auto", "on", "off"),
@@ -1212,6 +1307,11 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         metavar="W:H:X:Y",
         help="Paint out a burned-in mark before cropping. Repeatable.",
+    )
+    parser.add_argument(
+        "--thumb-only",
+        action="store_true",
+        help="Remake the thumbnail from the existing clip; do not re-render the video.",
     )
     parser.add_argument(
         "--overwrite",
@@ -1386,6 +1486,7 @@ def main(argv: list[str] | None = None) -> int:
         thumb_headline=args.thumb_headline,
         thumb_lines=args.thumb_lines,
         thumb_margin=args.thumb_margin,
+        thumb_pos=args.thumb_pos,
         limit=args.limit,
         src_crop=args.src_crop,
         reuse_segments=args.reuse_segments,
@@ -1406,6 +1507,7 @@ def main(argv: list[str] | None = None) -> int:
         text_edges=args.text_edges,
         src_delogo=tuple(args.src_delogo),
         overwrite=args.overwrite,
+        thumb_only=args.thumb_only,
         channel_tag=args.channel_tag,
         caption_size=args.caption_size,
         caption_max_lines=args.caption_max_lines,

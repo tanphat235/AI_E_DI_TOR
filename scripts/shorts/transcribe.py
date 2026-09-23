@@ -62,6 +62,9 @@ def transcribe(
     model_name: str,
     language: str,
     force: bool,
+    beam: int = 5,
+    compute_type: str = "float32",
+    initial_prompt: str | None = None,
 ) -> int:
     from faster_whisper import WhisperModel
 
@@ -73,18 +76,36 @@ def transcribe(
         return 1
 
     log_file.write_text("", encoding="utf-8")
-    log(f"Loading model {model_name} (cpu int8)...", log_file)
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    log("Transcribing...", log_file)
+    log(f"Loading model {model_name} (cpu {compute_type})...", log_file)
+    model = WhisperModel(model_name, device="cpu", compute_type=compute_type)
+    log(f"Transcribing (beam {beam})...", log_file)
     t0 = time.time()
+    # beam 5 and float32, not beam 1 and int8. Greedy decoding commits to the
+    # likeliest syllable as it goes and never reconsiders, which is how a talk
+    # about "dính mắc" -- attachment, the whole subject of the passage -- came
+    # out as "dính mắt" three times in a row. Measured on 45 s of cut_1:
+    #
+    #   small int8 beam1   0/3 correct   37 s   <- what was shipping
+    #   small float32 beam5  3/3         42 s
+    #   medium int8 beam5    0/3        120 s
+    #   large-v3 beam5       2/3        161 s, and 17-second segments
+    #
+    # Five seconds buys the word that the passage is about. A bigger model is
+    # not the lever here; the search is.
     segments, info = model.transcribe(
         str(wav),
         language=language,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 800},
         word_timestamps=False,
-        beam_size=1,
-        best_of=1,
+        beam_size=beam,
+        best_of=beam,
+        # Off by default. It does bias the decoder towards the domain's
+        # vocabulary, but it leaks: a prompt beginning "Thầy Thích Pháp Hòa"
+        # turned the speaker's "hễ" into "Thầy" twice in the same passage.
+        # Trading one wrong word for another is not an improvement.
+        initial_prompt=initial_prompt,
+        condition_on_previous_text=True,
     )
     rows: list[dict] = []
     for i, seg in enumerate(segments):
@@ -134,6 +155,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--model", default="base", help="faster-whisper model name.")
     parser.add_argument("--language", default="vi")
+    parser.add_argument(
+        "--beam", type=int, default=5,
+        help="Beam width. 1 is greedy and decides each syllable alone.",
+    )
+    parser.add_argument(
+        "--compute-type", default="float32",
+        help="int8 is faster and measurably less accurate.",
+    )
+    parser.add_argument(
+        "--initial-prompt", default=None,
+        help="Domain vocabulary to bias the decoder. Leaks into the text; "
+             "check the result before keeping it.",
+    )
     parser.add_argument("--force", action="store_true", help="Ignore cached transcript.")
     parser.add_argument(
         "--skip-extract",
@@ -164,6 +198,9 @@ def main(argv: list[str] | None = None) -> int:
         model_name=args.model,
         language=args.language,
         force=args.force,
+        beam=args.beam,
+        compute_type=args.compute_type,
+        initial_prompt=args.initial_prompt,
     )
 
 
