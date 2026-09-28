@@ -1,0 +1,7 @@
+# Deliberately not an extra in pyproject.toml: AIVE promises no network calls, and
+# tests/unit/test_packaging.py holds every extra to "imported somewhere under app/".
+# This is all the Linux server needs - it does not install AIVE itself.
+httpx>=0.27
+pydantic>=2.9
+# Optional. Lets `check` read duration, size and fps; without it those checks are skipped.
+# av>=13.0

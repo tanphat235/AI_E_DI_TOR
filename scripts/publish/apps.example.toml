@@ -1,0 +1,21 @@
+# Copy to ~/.aive-publish/apps.toml (Windows: %USERPROFILE%\.aive-publish\apps.toml)
+# and fill in. These are app credentials, not account passwords - but they are
+# still secrets. Never commit the filled-in copy.
+
+[youtube]
+# Google Cloud Console -> APIs & Services -> Credentials -> OAuth client ID,
+# application type "Desktop app".
+client_id = ""
+client_secret = ""
+
+[facebook]
+# developers.facebook.com -> My Apps -> your app -> App settings -> Basic.
+app_id = ""
+app_secret = ""
+# Optional. Needed only when your account manages more than one Page.
+page_id = ""
+
+[tiktok]
+# developers.tiktok.com -> Manage apps -> your app -> App details.
+client_key = ""
+client_secret = ""

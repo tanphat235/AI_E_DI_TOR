@@ -1,0 +1,51 @@
+# Every number `check` and the uploaders act on. Values marked "unverified" are
+# commonly cited but were not found on an official page; they only ever warn.
+
+[youtube]
+title_max = 100
+description_max = 5000
+# Sum of tag lengths, counted with separators, as YouTube Studio counts them.
+tags_total_max = 500
+# YouTube ignores every hashtag on a video that carries more than this. Unverified.
+hashtags_max = 60
+# Longer uploads are accepted but become regular videos rather than Shorts.
+shorts_max_seconds = 180
+category_id = "22"
+
+[facebook]
+graph_version = "v26.0"
+# Unverified: Reels outside this window are rejected or posted as regular video.
+reels_min_seconds = 3
+reels_max_seconds = 90
+# Reels processing rejects anything smaller (error text from the status endpoint).
+min_short_side = 540
+# Unverified; a warning only.
+description_max = 2200
+status_poll_attempts = 30
+status_poll_seconds = 10
+
+[tiktok]
+# https://developers.tiktok.com/doc/content-posting-api-media-transfer-guide
+min_chunk_bytes = 5_000_000
+max_chunk_bytes = 64_000_000
+chunk_bytes = 32_000_000
+max_chunks = 1000
+max_seconds = 600
+min_fps = 23
+max_fps = 60
+min_side = 360
+max_side = 4096
+# Unverified for inbox uploads (documented for Direct Post titles).
+caption_max = 2200
+status_poll_attempts = 30
+status_poll_seconds = 10
+
+[upload]
+# Resumable retries for YouTube and chunk retries for TikTok.
+max_attempts = 5
+read_block_bytes = 8_388_608
+timeout_seconds = 600
+
+[schedule]
+# OpenClaw kills a command job after 10 minutes by default.
+timeout_seconds = 1800
