@@ -91,6 +91,24 @@ to find candidates fast, then set the crop yourself from the montage.
 - `build_shorts.py` — the renderer. Splits, crops, flips, stacks B-roll below,
   lays a music bed. Gain for that bed is **per recording, not per track**: it
   follows the talk's own level and noise floor.
+- `fetch_youtube.py` — downloads a talk via yt-dlp (the only network call in
+  this folder) to `<work-dir>/source/source.mp4`, capped at 1080p.
+- `cut_raw_clips.py` — reads `.aive/answer_segments.json` and slices the
+  source into whole raw clips, one per span, each a re-encode (not `-c copy`)
+  so the cut lands on the chosen second rather than the nearest keyframe. No
+  crop, caption or B-roll -- this is upstream of `build_shorts.py`, not a
+  replacement for it.
+- `ingest_talk.py` — chains the four above for the common case: a YouTube
+  link (or a file already on disk) in, whole content-boundary clips in
+  `projects/<job>/raw_clips/` out. Defaults `segment_qa.py`'s
+  `--target-sec`/`--max-sec` far larger than the shorts pipeline's (300/900s
+  instead of 120/175s) — the point is one clip per teaching or per
+  question-and-answer, not a short.
+
+  ```powershell
+  .\.venv\Scripts\python.exe scripts\shorts\ingest_talk.py `
+    --url https://youtu.be/XXXXXXXXXXX --job phap-thoai-01
+  ```
 
 ## The centre layout — the standard for new projects
 
