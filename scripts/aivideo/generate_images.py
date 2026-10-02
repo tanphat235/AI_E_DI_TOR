@@ -143,10 +143,11 @@ def main() -> int:
             print(f"  [{i:2d}/{len(lines)}] BLANK (std {spread:.2f}) -- VAE overflow")
             return 1
         image.save(dst)
-        print(
-            f"  [{i:2d}/{len(lines)}] {dst.name}  {time.time() - t0:5.1f}s"
-            f"  {line['text'][:40]}"
-        )
+        # "text" is the spoken line in a per-line narration script; a one-off
+        # still generated to stand in for narration that already exists
+        # elsewhere (an extracted or original recording) carries no such line.
+        label = line.get("text", line["image"])[:40]
+        print(f"  [{i:2d}/{len(lines)}] {dst.name}  {time.time() - t0:5.1f}s  {label}")
 
     print(f"\n{len(list(out_dir.glob('*.png')))} images in {out_dir}")
     return 0
