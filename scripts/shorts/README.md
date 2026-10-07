@@ -131,23 +131,38 @@ is still the default, and nothing about it has changed. New projects should use
 +----------------------------+
 ```
 
-The recipe, with the numbers that were measured rather than chosen:
+**The flag block is a shared module, not something to copy-paste.**
+`scripts/shorts/center_format.py` holds every center-format default (layout,
+talk framing, voice, music-bed, broll, caption/tag) in one place, committed to
+the repo so it's the same on every machine that clones it. A project's
+`batch.py` imports it and only supplies what genuinely varies per source —
+the crop, the delogo boxes, and `--speed` when a job needs it:
 
-```powershell
-.\.venv\Scripts\python.exe scripts\shorts\build_shorts.py `
-  --source <talk.mp4> --work-dir projects\<job> --broll-dir projects\stock-pexels\raw `
-  --segments-file projects\<job>\.aive\qa_segments.json `
-  --src-crop <w:h:x:y> `           # measure it first; see the standing rule above
-  --layout center `
-  --flip top `                     # mirrors the talk only; text is drawn after
-  --talk-zoom auto `               # frame on the speaker; see below
-  --part-transition dissolve --part-transition-sec 0.5 `
-  --voice-clarity --voice-pitch 0.94 --peak-dbfs -1 `
-  --music projects\music-background\"phat phap cung tieng mo.mp4" `
-  --music-duck off --music-compress --music-dip-db -5 --music-fade 1.0 `
-  --music-window flattest --music-under-db 14 `
-  --broll-bed --broll-seed 11 --broll-chunk 12 --broll-spread golden
+```python
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "scripts" / "shorts"))
+import center_format
+
+COMMON = center_format.common_args(
+    crop="810:720:350:0",            # measure it first; see the standing rule above
+    delogo=["330:58:108:478"],       # zero or more "W:H:X:Y" boxes, source-frame coords
+    music=str(REPO / "projects" / "music-background" / "phat phap cung tieng mo.mp4"),
+    speed=1.1,                       # omit entirely for 1.0
+)
 ```
+
+Changing a house-wide number (a new zoom cap, a pitch correction) means
+editing `center_format.py` once; every project that imports it picks it up on
+its next render. The numbers it currently holds, each measured rather than
+chosen: `--talk-zoom-max 1.7` (raised from 1.4 on 2026-10-07 — 1.4 was
+clamping short of `--talk-face-frac`'s own 0.45 target on an ordinary,
+non-upscaled source), `--talk-face-frac 0.45`, `--voice-pitch 0.94`,
+`--peak-dbfs -1`, a 0.5s dissolve, `--no-captions` with `--channel-tag` in
+its place (burned captions from the re-upload's own audio were wrong often
+enough to drop, 2026-09-23).
 
 **The title comes from `thumb_text` on each segment**, the same clickbait line
 the thumbnail uses, so write those before rendering (see the `set_headlines`
