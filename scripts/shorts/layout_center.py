@@ -73,8 +73,11 @@ class CentreStyle:
     scrim: str = "black@0.55"
     # Padding inside the scrim box, as a fraction of the font size.
     pad_ratio: float = 0.30
-    # Clear space between the talk and each text block.
-    gap: int = 18
+    # Pixels of scene between a text plate and the talk. 0: the plate touches
+    # the picture. 18 left a light strip of background there, which was the
+    # gap marked on 2026-10-08. The scene bands are the space outside the
+    # plates, not this number.
+    gap: int = 0
     # Fraction of the frame width text may occupy before it wraps.
     wrap_frac: float = 0.90
     # Advance width per character, in ems, used to wrap without a font engine.
@@ -113,6 +116,14 @@ class Geometry:
     scene_top_h: int
     scene_bottom_h: int
     notes: tuple[str, ...] = field(default=())
+    # Drawn plate heights. 0 means the drawbox computes its own from the font
+    # metrics. Edges mode sets both so the plates are exactly the ink and abut
+    # the talk: a pad inside the plate showed the scene through the scrim and
+    # read as a light gap between the text and the picture.
+    title_plate_h: int = 0
+    caption_plate_h: int = 0
+    # Padding _plate should use. -1 keeps the style's pad_ratio.
+    plate_pad: int = -1
 
 
 _BS = chr(92)
@@ -189,6 +200,22 @@ def wrap(
     return best
 
 
+def _plate_size(
+    size: int, slots: int, line_h: int, style: CentreStyle, *, pad_px: int | None = None
+) -> tuple[int, int]:
+    """Padding above the ink, and the full drawbox height.
+
+    The last slot is the measured ink height, not another line-height step.
+    Reserving ``line_h`` for every line and drawing the shorter ink box left
+    a gap between the plate and the talk. ``pad_px`` overrides ``pad_ratio``;
+    edges mode passes 0 so the plate is the ink and nothing else.
+    """
+    pad = int(size * style.pad_ratio) if pad_px is None else pad_px
+    slots = max(1, slots)
+    height = (slots - 1) * line_h + int(size * style.ink_ratio) + 2 * pad
+    return pad, height
+
+
 def geometry(
     *,
     talk_h: int,
@@ -218,21 +245,28 @@ def geometry(
     """
     title_line_h = int(style.title_size * style.line_ratio)
     caption_line_h = int(style.caption_size * style.line_ratio)
-    title_pad = int(style.title_size * style.pad_ratio)
-    caption_pad = int(style.caption_size * style.pad_ratio)
-
-    title_block = title_line_h * max(1, title_line_count) + 2 * title_pad
-    caption_block = caption_line_h * style.caption_lines + 2 * caption_pad
 
     notes: list[str] = []
     if edges:
-        talk_h = max(2, (style.frame_h - title_block - caption_block) // 2 * 2)
-        talk_y = title_block
+        # Pad 0. The old pad (0.30em) was empty scrim, and the scene showed
+        # through it as a light strip between the glyphs and the picture, and
+        # between the glyphs and the frame edge. That strip is the gap.
+        title_pad, title_plate = _plate_size(
+            style.title_size, title_line_count, title_line_h, style, pad_px=0
+        )
+        caption_pad, caption_plate = _plate_size(
+            style.caption_size, style.caption_lines, caption_line_h, style, pad_px=0
+        )
+        span = style.frame_h - title_plate - caption_plate
+        talk_h = max(2, span // 2 * 2)
+        # yuv420 wants an even talk height. The leftover pixel stays on the
+        # bottom plate so it still ends on the frame edge.
+        caption_plate += span - talk_h
+        talk_y = title_plate
         title_top = title_pad
-        caption_top = style.frame_h - caption_block + caption_pad
-        # The plates are the scene: it is visible through them and nowhere else.
-        scene_top_h = title_block
-        scene_bottom_h = caption_block
+        caption_top = talk_y + talk_h + caption_pad
+        scene_top_h = title_plate
+        scene_bottom_h = caption_plate
         if talk_h < style.frame_h // 2:
             notes.append(f"talk is only {talk_h}px of {style.frame_h}; the text blocks are large")
         return Geometry(
@@ -245,20 +279,30 @@ def geometry(
             scene_top_h=scene_top_h,
             scene_bottom_h=scene_bottom_h,
             notes=tuple(notes),
+            title_plate_h=title_plate,
+            caption_plate_h=caption_plate,
+            plate_pad=0,
         )
 
+    # Ink-tight plates, same as edges mode. A pad inside the plate showed the
+    # scene through the scrim and read as a gap between the words and the talk.
+    title_pad, title_plate = _plate_size(
+        style.title_size, title_line_count, title_line_h, style, pad_px=0
+    )
+    caption_pad, caption_plate = _plate_size(
+        style.caption_size, style.caption_lines, caption_line_h, style, pad_px=0
+    )
     talk_y = (style.frame_h - talk_h) // 2
-    title_top = talk_y - style.gap - title_block + title_pad
+    title_top = talk_y - style.gap - title_plate + title_pad
     caption_top = talk_y + talk_h + style.gap + caption_pad
-
-    scene_top_h = max(0, title_top - title_pad)
-    scene_bottom_h = max(0, style.frame_h - (caption_top - caption_pad + caption_block))
+    scene_top_h = max(0, talk_y - style.gap - title_plate)
+    scene_bottom_h = max(0, style.frame_h - (talk_y + talk_h + style.gap + caption_plate))
 
     if scene_top_h < 80:
         notes.append(f"top scene band is only {scene_top_h}px; lower --talk-h to widen it")
     if scene_bottom_h < 80:
         notes.append(f"bottom scene band is only {scene_bottom_h}px; lower --talk-h")
-    if title_top - title_pad < 0:
+    if scene_top_h == 0 and title_plate > 0:
         notes.append("title block runs off the top of the frame; lower --talk-h")
     return Geometry(
         talk_h=talk_h,
@@ -270,6 +314,9 @@ def geometry(
         scene_top_h=scene_top_h,
         scene_bottom_h=scene_bottom_h,
         notes=tuple(notes),
+        title_plate_h=title_plate,
+        caption_plate_h=caption_plate,
+        plate_pad=0,
     )
 
 
@@ -418,7 +465,15 @@ def _text_block(
 
 
 def _plate(
-    *, style: CentreStyle, size: int, top: int, line_h: int, slots: int, enable: str = ""
+    *,
+    style: CentreStyle,
+    size: int,
+    top: int,
+    line_h: int,
+    slots: int,
+    enable: str = "",
+    height: int = 0,
+    pad_px: int = -1,
 ) -> str:
     """The scrim behind a text block.
 
@@ -426,9 +481,14 @@ def _plate(
     the font's declared line height, which for this face is 2.67 em, so a
     two-line caption came out in a plate half again too tall. This one is sized
     from the measured ink height instead.
+
+    ``height`` is set when geometry has already reserved the plate, including
+    the one pixel an even talk height can leave over. Drawing a shorter box
+    opens a gap under the text.
     """
-    pad = int(size * style.pad_ratio)
-    h = (slots - 1) * line_h + int(size * style.ink_ratio) + 2 * pad
+    pad, h = _plate_size(size, slots, line_h, style, pad_px=None if pad_px < 0 else pad_px)
+    if height:
+        h = height
     opts = ["x=0", f"y={top - pad}", "w=iw", f"h={h}", f"color={style.scrim}", "t=fill"]
     if enable:
         opts.append(f"enable='{enable}'")
@@ -575,6 +635,8 @@ def video_graph(
                 top=geom.title_top,
                 line_h=geom.title_line_h,
                 slots=len(title),
+                height=geom.title_plate_h,
+                pad_px=geom.plate_pad,
             )
         )
         draws += _text_block(
@@ -600,6 +662,8 @@ def video_graph(
                 top=geom.caption_top,
                 line_h=geom.caption_line_h,
                 slots=1,
+                height=geom.caption_plate_h,
+                pad_px=geom.plate_pad,
             )
         )
         draws += _text_block(
@@ -625,6 +689,8 @@ def video_graph(
                 line_h=geom.caption_line_h,
                 slots=style.caption_lines,
                 enable=f"between(t,{a:.3f},{b:.3f})",
+                height=geom.caption_plate_h,
+                pad_px=geom.plate_pad,
             )
         )
     for i, cue in enumerate(cues):
