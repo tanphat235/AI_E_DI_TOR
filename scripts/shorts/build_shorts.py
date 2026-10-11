@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import layout_center as lc  # noqa: E402  (needs the path above)
+import layout_center as lc
 
 
 def _ffmpeg() -> Path:
@@ -1115,10 +1115,21 @@ def run(settings: Settings) -> int:
                 n = max(6, min(24, int((hi - lo) / 8)))
                 times += [lo + (hi - lo) * (k + 0.5) / n for k in range(n)]
             if settings.talk_zoom == "auto":
+                # One zoom is applied to every part. When the parts name one
+                # shared crop, measure the face inside that box; the project
+                # crop is the close-up and would frame a wide shot wrong.
+                span_crops = [
+                    str(part.get("crop") or settings.src_crop) for part in spans
+                ]
+                measure_crop = (
+                    span_crops[0]
+                    if len(set(span_crops)) == 1
+                    else settings.src_crop
+                )
                 fr = lc.measure_face(
                     ffmpeg,
                     settings.source,
-                    src_crop=settings.src_crop,
+                    src_crop=measure_crop,
                     talk_h=talk_h,
                     times=times[:40],
                     frame_w=settings.out_w,
