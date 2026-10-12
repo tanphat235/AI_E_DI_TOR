@@ -78,6 +78,15 @@ class CentreStyle:
     # gap marked on 2026-10-08. The scene bands are the space outside the
     # plates, not this number.
     gap: int = 0
+    # Minimum clear scene above the title plate, pixels. At talk_h=1344 the
+    # centred talk leaves only ~100px there, and YouTube's own Shorts-studio
+    # grid thumbnail (the dashboard list view, not the player) crops enough
+    # off the top that the title was reading as almost entirely cut off --
+    # reported 2026-10-12 with a screenshot of that grid. The talk is no
+    # longer vertically centred once this is bigger than the natural margin:
+    # it shifts down and the bottom scene band absorbs the difference, which
+    # is fine, the tag survives the same crop with much more room to spare.
+    min_top_margin: int = 220
     # Fraction of the frame width text may occupy before it wraps.
     wrap_frac: float = 0.90
     # Advance width per character, in ems, used to wrap without a font engine.
@@ -225,6 +234,11 @@ def geometry(
 ) -> Geometry:
     """Place the talk centred, then hang the title above it and the caption below.
 
+    "Centred" is the starting point, not a guarantee: ``style.min_top_margin``
+    can push the talk down from centre to keep the title clear of a crop
+    applied somewhere downstream (see that field's docstring). The bottom
+    scene band absorbs whatever that costs the top one.
+
     The talk is centred rather than pinned so both scene bands survive: with a
     16:9 source (608 px tall) they come out 384 and 459 px, and with a squarer
     9:8 crop (960 px) still 208 and 283 px. A talk taller than about 1250 px
@@ -293,6 +307,9 @@ def geometry(
         style.caption_size, style.caption_lines, caption_line_h, style, pad_px=0
     )
     talk_y = (style.frame_h - talk_h) // 2
+    min_talk_y = style.gap + title_plate + style.min_top_margin
+    if talk_y < min_talk_y:
+        talk_y = min_talk_y
     title_top = talk_y - style.gap - title_plate + title_pad
     caption_top = talk_y + talk_h + style.gap + caption_pad
     scene_top_h = max(0, talk_y - style.gap - title_plate)
