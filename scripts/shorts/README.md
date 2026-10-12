@@ -157,16 +157,22 @@ COMMON = center_format.common_args(
 Changing a house-wide number (a new zoom cap, a pitch correction) means
 editing `center_format.py` once; every project that imports it picks it up on
 its next render. The numbers it currently holds, each measured rather than
-chosen: `--talk-h 1344` (70% of the 1920 frame, raised from 960/50% on
-2026-10-10, with the title/tag plates made ink-tight against it and the 18px
-gap dropped to 0 the same day — see `center_format.py`'s own docstring for
-why; don't put the gap or the plate padding back without being asked),
-`--talk-zoom-max 1.7` (raised from 1.4 on 2026-10-07 — 1.4 was clamping short
-of `--talk-face-frac`'s own 0.45 target on an ordinary, non-upscaled source),
-`--talk-face-frac 0.45`, `--speed 1.1` (the default pace since 2026-10-08;
-pass `speed=1.0` to a job that shouldn't be sped up), `--voice-pitch 0.94`,
-`--peak-dbfs -1`, a 0.5s dissolve, `--no-captions` with `--channel-tag` in
-its place (burned captions from the re-upload's own audio were wrong often
+chosen: a **derived talk height**, not a fixed one, as of 2026-10-13 —
+`CentreStyle.edge_margin_frac` (0.15) reserves a plain scene band of exactly
+15% of the frame at the very top and another 15% at the very bottom, and the
+title/talk/tag group (ink-tight internally — no gap, no plate padding, that
+strip of scene showing through was the 2026-10-08 complaint) is centred as
+one block in the remaining 70%. `--talk-h` is accordingly ignored unless
+`--edge-margin-frac 0` is also passed (see `center_format.py`'s module
+docstring for the two earlier, narrower attempts this replaced — fixed
+talk_h with scene as leftover, then a one-sided push — and why both were
+wrong), `--talk-zoom-max 1.7` (raised from 1.4 on 2026-10-07 — 1.4 was
+clamping short of `--talk-face-frac`'s own 0.45 target on an ordinary,
+non-upscaled source), `--talk-face-frac 0.45`, `--speed 1.1` (the default
+pace since 2026-10-08; pass `speed=1.0` to a job that shouldn't be sped up),
+`--voice-pitch 0.94`, `--peak-dbfs -1`, a 0.5s dissolve, `--no-captions` with
+`--channel-tag` in its place (burned captions from the re-upload's own audio
+were wrong often
 enough to drop, 2026-09-23).
 
 **The title comes from `thumb_text` on each segment**, the same clickbait line
