@@ -138,8 +138,12 @@ class Settings:
     # full-frame scene background with title above and caption below.
     layout: str = "half"
     # Height of the talk inside the centre layout; 0 derives it from the
-    # source's own aspect after --src-crop, so nothing is stretched.
+    # source's own aspect after --src-crop, so nothing is stretched. Ignored
+    # whenever edge_margin_frac (below) is nonzero.
     talk_h: int = 0
+    # None: use CentreStyle's own default (0.15) for the centre layout's
+    # fixed top/bottom scene bands. See center_format.py's module docstring.
+    edge_margin_frac: float | None = None
     # Draw a caption of the speech under the talk (centre layout only). Needs
     # .aive/transcript.json, which transcribe.py writes.
     captions: bool = True
@@ -935,7 +939,7 @@ def run(settings: Settings) -> int:
         # band for nothing.
         tag_only = bool(settings.channel_tag) and not settings.captions
         base = lc.CentreStyle()
-        style = lc.CentreStyle(
+        style_kwargs = dict(
             frame_w=settings.out_w,
             frame_h=settings.out_h,
             font=settings.centre_font,
@@ -944,12 +948,17 @@ def run(settings: Settings) -> int:
             caption_size=base.tag_size if tag_only else settings.caption_size,
             caption_lines=1 if tag_only else settings.caption_max_lines,
         )
+        if settings.edge_margin_frac is not None:
+            style_kwargs["edge_margin_frac"] = settings.edge_margin_frac
+        style = lc.CentreStyle(**style_kwargs)
         talk_h = settings.talk_h or _talk_height(
             settings.source, settings.src_crop, settings.out_w
         )
-        # In edges mode the band height comes from geometry, per clip, so the
+        # In edges mode, and whenever CentreStyle.edge_margin_frac is set (the
+        # default), the band height comes from geometry per clip, so the
         # setting printed here would be a number the render never uses.
-        band = "derived per clip (--text-edges)" if settings.text_edges else f"{settings.out_w}x{talk_h}"
+        derived = settings.text_edges or style.edge_margin_frac > 0
+        band = "derived per clip" if derived else f"{settings.out_w}x{talk_h}"
         print(
             f"layout=center frame={settings.out_w}x{settings.out_h} "
             f"talk={band} font={style.font.name}"
@@ -1361,7 +1370,24 @@ def main(argv: list[str] | None = None) -> int:
         "--talk-h",
         type=int,
         default=0,
-        help="Talk height in the centre layout; 0 derives it from the source aspect.",
+        help=(
+            "Talk height in the centre layout; 0 derives it from the source aspect. "
+            "Ignored whenever --edge-margin-frac (or its default) is nonzero -- the "
+            "talk height is derived from that instead."
+        ),
+    )
+    parser.add_argument(
+        "--edge-margin-frac",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of frame height reserved as a scene band at the very top and "
+            "very bottom (equal on both sides); the title/talk/tag group is centred "
+            "as one block in what's left, and --talk-h is ignored. Default (unset) "
+            "uses CentreStyle's own default, 0.15. Pass 0 to fall back to a fixed "
+            "--talk-h centred directly in the frame instead (the pre-2026-10-13 "
+            "behaviour)."
+        ),
     )
     parser.add_argument(
         "--no-captions",
@@ -1588,6 +1614,7 @@ def main(argv: list[str] | None = None) -> int:
         flip=args.flip,
         layout=args.layout,
         talk_h=args.talk_h,
+        edge_margin_frac=args.edge_margin_frac,
         captions=args.captions,
         centre_font=args.centre_font,
         title_size=args.title_size,

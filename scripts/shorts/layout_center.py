@@ -73,25 +73,24 @@ class CentreStyle:
     scrim: str = "black@0.55"
     # Padding inside the scrim box, as a fraction of the font size.
     pad_ratio: float = 0.30
-    # Pixels of scene between a text plate and the talk. 0: the plate touches
-    # the picture. 18 left a light strip of background there, which was the
-    # gap marked on 2026-10-08. The scene bands are the space outside the
-    # plates, not this number.
-    gap: int = 0
-    # Minimum clear scene above the title plate, pixels. At talk_h=1344 the
-    # centred talk leaves only ~100px there, and YouTube crops enough off the
-    # top -- in both the Shorts-studio grid thumbnail AND the single-video
-    # editor/preview player -- that the title was reading as almost entirely
-    # cut off in both. First raised to 220 on 2026-10-12, which fixed the
-    # grid thumbnail but was still not enough for the preview player (a
-    # second screenshot, same day); raised again to 380, now comfortably
-    # past the ~312px crop measured by simulation against the worse of the
-    # two. The talk is no longer vertically centred once this is bigger than
-    # the natural margin: it shifts down and the bottom scene band absorbs
-    # the difference -- which is why TALK_H also came down from 1344 to 1200
-    # in center_format.py the same day, so the tag keeps a real margin
-    # instead of being pushed down to almost nothing.
-    min_top_margin: int = 380
+    # Scene band reserved at the very top AND very bottom of the frame, as a
+    # fraction of frame height, equal on both sides. The title/talk/tag group
+    # is ink-tight internally (no gap, no plate padding -- that strip of
+    # scene showing through was the complaint on 2026-10-08) and sits exactly
+    # centred as a block in the remaining (1 - 2*edge_margin_frac) share of
+    # the frame. talk_h is derived from this, not an independent choice: see
+    # geometry().
+    #
+    # History: talk_h was a direct 960 (2026-09) then 1344 (2026-10-10)
+    # input with the leftover split giving the talk a centred band and
+    # whatever scene fell out above/below it. That leftover above the title
+    # shrank to near nothing at 1344 and a "push the talk down" patch
+    # (min_top_margin) chased it for a day -- fixing the top but making the
+    # whole composition read as bottom-heavy ("lệch xuống dưới", reported
+    # 2026-10-13). Fixed sizes for both edges, derived talk_h, is what the
+    # user actually asked for: 15% scene reserved top and bottom, everything
+    # else centred as one group.
+    edge_margin_frac: float = 0.15
     # Fraction of the frame width text may occupy before it wraps.
     wrap_frac: float = 0.90
     # Advance width per character, in ems, used to wrap without a font engine.
@@ -237,18 +236,18 @@ def geometry(
     style: CentreStyle,
     edges: bool = False,
 ) -> Geometry:
-    """Place the talk centred, then hang the title above it and the caption below.
+    """Reserve a fixed scene band top and bottom, derive the talk to fill the rest.
 
-    "Centred" is the starting point, not a guarantee: ``style.min_top_margin``
-    can push the talk down from centre to keep the title clear of a crop
-    applied somewhere downstream (see that field's docstring). The bottom
-    scene band absorbs whatever that costs the top one.
-
-    The talk is centred rather than pinned so both scene bands survive: with a
-    16:9 source (608 px tall) they come out 384 and 459 px, and with a squarer
-    9:8 crop (960 px) still 208 and 283 px. A talk taller than about 1250 px
-    leaves no room for a scene band, which is why ``notes`` reports the
-    remaining heights for the caller to print.
+    ``talk_h`` is a fallback only, used when ``style.edge_margin_frac`` is 0
+    (landscape jobs built by hand without going through center_format.py,
+    where 82px/126px fixed bands were measured directly rather than as a
+    percentage -- see README). Whenever it's set, which it is by default,
+    the talk's height is derived, not chosen: the title/talk/tag group is
+    ink-tight (no gap, no plate padding) and sits centred as one block in
+    the ``1 - 2*edge_margin_frac`` share of the frame, with the remainder
+    split exactly evenly top and bottom. A talk taller than about 1250px on
+    a 1920-tall frame leaves no real room for the text, which is why
+    ``notes`` reports the derived heights for the caller to print.
 
     ``edges`` is the other arrangement: the title sits flush against the top of
     the frame, the caption or tag flush against the bottom, and the talk takes
@@ -311,14 +310,31 @@ def geometry(
     caption_pad, caption_plate = _plate_size(
         style.caption_size, style.caption_lines, caption_line_h, style, pad_px=0
     )
-    talk_y = (style.frame_h - talk_h) // 2
-    min_talk_y = style.gap + title_plate + style.min_top_margin
-    if talk_y < min_talk_y:
-        talk_y = min_talk_y
-    title_top = talk_y - style.gap - title_plate + title_pad
-    caption_top = talk_y + talk_h + style.gap + caption_pad
-    scene_top_h = max(0, talk_y - style.gap - title_plate)
-    scene_bottom_h = max(0, style.frame_h - (talk_y + talk_h + style.gap + caption_plate))
+    if style.edge_margin_frac > 0:
+        # Fixed bands, derived talk: the group is centred as a block, not the
+        # talk alone (the group's two ends are unequal -- a 2-line title is
+        # taller than a 1-line tag -- so centring the talk instead would
+        # leave unequal scene bands even with equal top/bottom margins).
+        top_margin = int(style.frame_h * style.edge_margin_frac)
+        bottom_margin = int(style.frame_h * style.edge_margin_frac)
+        span = style.frame_h - top_margin - bottom_margin - title_plate - caption_plate
+        talk_h = max(2, span // 2 * 2)
+        # yuv420 wants an even talk height. The leftover pixel goes to the
+        # bottom margin so the top one stays exactly the requested fraction.
+        bottom_margin += span - talk_h
+        talk_y = top_margin + title_plate
+        title_top = top_margin + title_pad
+        caption_top = talk_y + talk_h + caption_pad
+        scene_top_h = top_margin
+        scene_bottom_h = style.frame_h - (talk_y + talk_h + caption_plate)
+    else:
+        # Fallback: talk_h chosen directly, centred in the frame. Used only
+        # when edge_margin_frac is 0 -- see the docstring.
+        talk_y = (style.frame_h - talk_h) // 2
+        title_top = talk_y - title_plate + title_pad
+        caption_top = talk_y + talk_h + caption_pad
+        scene_top_h = max(0, talk_y - title_plate)
+        scene_bottom_h = max(0, style.frame_h - (talk_y + talk_h + caption_plate))
 
     if scene_top_h < 80:
         notes.append(f"top scene band is only {scene_top_h}px; lower --talk-h to widen it")

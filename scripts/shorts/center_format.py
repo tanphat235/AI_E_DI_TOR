@@ -11,42 +11,48 @@ Per-project batch.py still owns what genuinely varies per source: the crop,
 the delogo boxes (every re-upload's watermark layout differs), the source
 path, and --speed when a job needs pacing adjusted to hit a length target.
 
-The talk is 62.5% of the 1080x1920 frame and sits in the middle
-(``--talk-h 1200``; was 1344/70% until 2026-10-12 -- see that date's note on
-``TALK_H`` below). Above the title and below the tag are background-scene
-bands, the same arrangement as the original centre layout. Do not pass
-``--text-edges``: that pins the title to the top edge and the tag to the
-bottom edge and removes both scene bands. It was tried on 2026-10-08 and
+As of 2026-10-13, the talk's height is **derived**, not chosen: 15% of the
+1920-tall frame is reserved as a plain scene band at the very top and
+another 15% at the very bottom (``CentreStyle.edge_margin_frac = 0.15``,
+the default), the title/talk/tag group is ink-tight internally (no gap, no
+plate padding -- that strip of scene showing through was the complaint on
+2026-10-08) and sits centred as one block in the remaining 70%. For the
+standard 2-line title / 1-line tag this works out to a ~1108px talk --
+``TALK_H`` below is that number for logging/reference, but the actual value
+build_shorts.py uses comes back from ``layout_center.geometry()`` per clip,
+because a title that needs a smaller font to fit (``fit_title``) has a
+shorter plate and so a taller derived talk. Passing ``--talk-h`` has no
+effect while ``edge_margin_frac`` is set. Do not pass ``--text-edges``:
+that's the other, unrelated way of deriving the talk height (pins title/tag
+to the literal frame edges, no scene band at all) -- tried 2026-10-08,
 rejected the next day.
 
-The title plate sits on the talk and the tag plate sits under it. Both plates
-are the ink only, so there is no light strip of scene between the words and
-the picture. That strip was the gap marked in red on 2026-10-08. Do not put
-the 18px gap or the plate padding back unless asked. `layout_center.py`'s
-``CentreStyle.min_top_margin`` additionally pushes the talk down from centre
-so the title clears a crop YouTube applies in its own UI -- see that field's
-docstring, not duplicated here.
+This replaced two earlier, narrower attempts the same week: talk_h fixed at
+1344 (70%) with scene bands as whatever was left over (title's leftover
+shrank to near-zero and got clipped by YouTube's own UI in two different
+views), then a one-sided push (``min_top_margin``) that fixed the top but
+left the composition reading as bottom-heavy. Fixed, equal percentages on
+both sides with the group centred as a whole is what was actually asked
+for; don't reintroduce either earlier shape without being asked.
 
-``--src-crop`` should match this band's aspect (1080x1200, about 1080x1200
-scaled, i.e. ~0.9:1 -- roughly 972x1080 on a 1920x1080 source). A crop
-measured for the old 960 or 1344 target (most existing per-project crops,
-measured at the 1080:960 = 1.125 aspect) is not a perfect match and gets
-cropped further to fill this band, which crops in on the face slightly more
-than intended -- re-measure a project's crop against the current TALK_H when
-its framing looks tighter than expected, rather than assuming the old
-numbers still apply exactly.
+``--src-crop`` should match the derived talk's aspect (1080:1108, about
+0.975:1 -- roughly 1053x1080 on a 1920x1080 source) for the standard title/
+tag sizing above. A crop measured for an older target (most existing
+per-project crops were measured at 1080:960 = 1.125) is not a perfect match
+and gets cropped further to fill the band, which crops in on the face
+slightly more than intended -- re-measure a project's crop if its framing
+looks tighter than expected, rather than assuming the old numbers still
+apply exactly.
 """
 
 from __future__ import annotations
 
 TAG = "@loiphatdayquathayphaphoa"
 TRANSITION_SEC = 0.5
-# 62.5% of the 1920-tall frame, down from 1344/70% on 2026-10-12. Raising
-# min_top_margin (layout_center.CentreStyle) to clear YouTube's own crop of
-# the title pushed the talk down far enough that 1344 left almost no room
-# for the bottom scene band / tag -- this gives that margin back. Even,
-# which yuv420 wants.
-TALK_H = 1200
+# Reference only -- see the module docstring. The real value is derived per
+# clip by layout_center.geometry() whenever CentreStyle.edge_margin_frac is
+# set, which it is by default; --talk-h is passed but has no effect there.
+TALK_H = 1108
 TALK_ZOOM_MAX = 1.7  # as of 2026-10-07; was 1.4 and was clamping short of
 # --talk-face-frac's own target on a normal (non-upscaled) 1280x720 source.
 TALK_FACE_FRAC = 0.45
@@ -79,18 +85,24 @@ def common_args(
     broll_chunk: int = BROLL_CHUNK,
     broll_spread: str = BROLL_SPREAD,
     captions: bool = False,
+    edge_margin_frac: float | None = None,
 ) -> list[str]:
     """The center-layout flag block shared by every project's batch.py.
 
     `delogo` is zero or more "W:H:X:Y" boxes in source-frame coordinates.
     `speed` defaults to the house pace (1.1); pass 1.0 to disable it for a
-    job that doesn't need the extra pacing.
+    job that doesn't need the extra pacing. `talk_h` is ignored by
+    build_shorts.py unless `edge_margin_frac=0` is also passed (the derived-
+    height behaviour is the default -- see this module's docstring); pass
+    both together for a job that must keep the pre-2026-10-13 fixed-talk_h
+    framing.
     """
     args: list[str] = [
         "--layout", "center",
         "--src-crop", crop,
         *[a for box in delogo for a in ("--src-delogo", box)],
         "--talk-h", str(talk_h),
+        *(["--edge-margin-frac", str(edge_margin_frac)] if edge_margin_frac is not None else []),
         "--flip", "top",
         "--talk-zoom", "auto",
         "--talk-face-frac", str(talk_face_frac),
