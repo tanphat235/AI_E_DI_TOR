@@ -11,8 +11,9 @@ Per-project batch.py still owns what genuinely varies per source: the crop,
 the delogo boxes (every re-upload's watermark layout differs), the source
 path, and --speed when a job needs pacing adjusted to hit a length target.
 
-The talk is 70% of the 1080x1920 frame and sits in the middle
-(``--talk-h 1344``). Above the title and below the tag are background-scene
+The talk is 62.5% of the 1080x1920 frame and sits in the middle
+(``--talk-h 1200``; was 1344/70% until 2026-10-12 -- see that date's note on
+``TALK_H`` below). Above the title and below the tag are background-scene
 bands, the same arrangement as the original centre layout. Do not pass
 ``--text-edges``: that pins the title to the top edge and the tag to the
 bottom edge and removes both scene bands. It was tried on 2026-10-08 and
@@ -21,18 +22,31 @@ rejected the next day.
 The title plate sits on the talk and the tag plate sits under it. Both plates
 are the ink only, so there is no light strip of scene between the words and
 the picture. That strip was the gap marked in red on 2026-10-08. Do not put
-the 18px gap or the plate padding back unless asked.
+the 18px gap or the plate padding back unless asked. `layout_center.py`'s
+``CentreStyle.min_top_margin`` additionally pushes the talk down from centre
+so the title clears a crop YouTube applies in its own UI -- see that field's
+docstring, not duplicated here.
 
-``--src-crop`` has to match this band (1080x1344, about 868x1080 on a 1920x1080
-source). A squarer crop scaled up to cover it slices the sides of the face.
+``--src-crop`` should match this band's aspect (1080x1200, about 1080x1200
+scaled, i.e. ~0.9:1 -- roughly 972x1080 on a 1920x1080 source). A crop
+measured for the old 960 or 1344 target (most existing per-project crops,
+measured at the 1080:960 = 1.125 aspect) is not a perfect match and gets
+cropped further to fill this band, which crops in on the face slightly more
+than intended -- re-measure a project's crop against the current TALK_H when
+its framing looks tighter than expected, rather than assuming the old
+numbers still apply exactly.
 """
 
 from __future__ import annotations
 
 TAG = "@loiphatdayquathayphaphoa"
 TRANSITION_SEC = 0.5
-# 70% of the 1920-tall frame. Even, which yuv420 wants.
-TALK_H = 1344
+# 62.5% of the 1920-tall frame, down from 1344/70% on 2026-10-12. Raising
+# min_top_margin (layout_center.CentreStyle) to clear YouTube's own crop of
+# the title pushed the talk down far enough that 1344 left almost no room
+# for the bottom scene band / tag -- this gives that margin back. Even,
+# which yuv420 wants.
+TALK_H = 1200
 TALK_ZOOM_MAX = 1.7  # as of 2026-10-07; was 1.4 and was clamping short of
 # --talk-face-frac's own target on a normal (non-upscaled) 1280x720 source.
 TALK_FACE_FRAC = 0.45

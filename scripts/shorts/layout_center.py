@@ -79,14 +79,19 @@ class CentreStyle:
     # plates, not this number.
     gap: int = 0
     # Minimum clear scene above the title plate, pixels. At talk_h=1344 the
-    # centred talk leaves only ~100px there, and YouTube's own Shorts-studio
-    # grid thumbnail (the dashboard list view, not the player) crops enough
-    # off the top that the title was reading as almost entirely cut off --
-    # reported 2026-10-12 with a screenshot of that grid. The talk is no
-    # longer vertically centred once this is bigger than the natural margin:
-    # it shifts down and the bottom scene band absorbs the difference, which
-    # is fine, the tag survives the same crop with much more room to spare.
-    min_top_margin: int = 220
+    # centred talk leaves only ~100px there, and YouTube crops enough off the
+    # top -- in both the Shorts-studio grid thumbnail AND the single-video
+    # editor/preview player -- that the title was reading as almost entirely
+    # cut off in both. First raised to 220 on 2026-10-12, which fixed the
+    # grid thumbnail but was still not enough for the preview player (a
+    # second screenshot, same day); raised again to 380, now comfortably
+    # past the ~312px crop measured by simulation against the worse of the
+    # two. The talk is no longer vertically centred once this is bigger than
+    # the natural margin: it shifts down and the bottom scene band absorbs
+    # the difference -- which is why TALK_H also came down from 1344 to 1200
+    # in center_format.py the same day, so the tag keeps a real margin
+    # instead of being pushed down to almost nothing.
+    min_top_margin: int = 380
     # Fraction of the frame width text may occupy before it wraps.
     wrap_frac: float = 0.90
     # Advance width per character, in ems, used to wrap without a font engine.
