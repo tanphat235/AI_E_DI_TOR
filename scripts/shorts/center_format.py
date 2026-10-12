@@ -39,6 +39,7 @@ TALK_FACE_FRAC = 0.45
 TALK_FACE_Y = 0.5
 VOICE_PITCH = 0.94
 PEAK_DBFS = -1.0
+SPEED = 1.1  # as of 2026-10-08; the default pace for every center-format short
 MUSIC_DIP_DB = -5.0
 MUSIC_FADE_SEC = 1.0
 MUSIC_UNDER_DB = 14.0
@@ -52,7 +53,7 @@ def common_args(
     music: str,
     delogo: list[str] | tuple[str, ...] = (),
     tag: str = TAG,
-    speed: float | None = None,
+    speed: float = SPEED,
     transition_sec: float = TRANSITION_SEC,
     talk_h: int = TALK_H,
     talk_zoom_max: float = TALK_ZOOM_MAX,
@@ -68,7 +69,8 @@ def common_args(
     """The center-layout flag block shared by every project's batch.py.
 
     `delogo` is zero or more "W:H:X:Y" boxes in source-frame coordinates.
-    `speed` is omitted (not passed) unless a job overrides it from 1.0.
+    `speed` defaults to the house pace (1.1); pass 1.0 to disable it for a
+    job that doesn't need the extra pacing.
     """
     args: list[str] = [
         "--layout", "center",
@@ -83,10 +85,7 @@ def common_args(
         "--voice-clarity",
         "--voice-pitch", str(voice_pitch),
         "--peak-dbfs", str(peak_dbfs),
-    ]
-    if speed is not None:
-        args += ["--speed", str(speed)]
-    args += [
+        "--speed", str(speed),
         "--part-transition", "dissolve",
         "--part-transition-sec", str(transition_sec),
         "--music", music,
