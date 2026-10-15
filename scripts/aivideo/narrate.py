@@ -221,6 +221,90 @@ def split_lines(lines: list[str], words: list[dict]) -> list[dict]:
     return out
 
 
+def _groups(lines: list[str], limit: int = 1600) -> list[list[str]]:
+    """Split on line boundaries so one request stays short enough to answer.
+
+    A single request for a ten-thousand-character script opens the socket and
+    then sends no audio. Pieces of about 1,600 characters return normally.
+    """
+    groups: list[list[str]] = []
+    cur: list[str] = []
+    n = 0
+    for line in lines:
+        extra = len(line) + (1 if cur else 0)
+        if cur and n + extra > limit:
+            groups.append(cur)
+            cur, n = [line], len(line)
+        else:
+            cur.append(line)
+            n += extra
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def _duration(path: Path) -> float:
+    import imageio_ffmpeg
+
+    log = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    ).stderr
+    match = re.search(r"Duration: (\d+):(\d+):(\d+\.\d+)", log)
+    if not match:
+        raise SystemExit(f"could not read the duration of {path.name}")
+    hours, minutes, seconds = match.groups()
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+async def _speak_retry(text: str, voice: str, mp3: Path, rate: str, pitch: str) -> list[dict]:
+    for attempt in range(1, 4):
+        try:
+            return await speak(text, voice, mp3, rate=rate, pitch=pitch)
+        except edge_tts.exceptions.NoAudioReceived:
+            if attempt == 3:
+                raise
+            print(f"no audio from the service (attempt {attempt}); retrying")
+            await asyncio.sleep(10 * attempt)
+    raise SystemExit("no audio")
+
+
+async def speak_script(lines: list[str], voice: str, mp3: Path, rate: str, pitch: str) -> list[dict]:
+    groups = _groups(lines)
+    if len(groups) == 1:
+        return await _speak_retry(" ".join(lines), voice, mp3, rate, pitch)
+
+    import imageio_ffmpeg
+
+    part_dir = mp3.parent / f"{mp3.stem}_parts"
+    part_dir.mkdir(parents=True, exist_ok=True)
+    marks: list[dict] = []
+    offset = 0.0
+    paths: list[Path] = []
+    for i, group in enumerate(groups):
+        part = part_dir / f"{i:03d}.mp3"
+        print(f"voice part {i + 1}/{len(groups)}", flush=True)
+        part_marks = await _speak_retry(" ".join(group), voice, part, rate, pitch)
+        dur = _duration(part)
+        for mark in part_marks:
+            mark["start"] += offset
+            mark["end"] += offset
+        marks.extend(part_marks)
+        offset += dur
+        paths.append(part)
+        await asyncio.sleep(1)
+    listing = part_dir / "list.txt"
+    listing.write_text(
+        "".join(f"file '{path.as_posix()}'\n" for path in paths), encoding="utf-8"
+    )
+    subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
+         "-f", "concat", "-safe", "0", "-i", str(listing), "-c", "copy", str(mp3)],
+        check=True,
+    )
+    return marks
+
+
 async def main() -> int:
     if len(sys.argv) < 2:
         print("usage: narrate.py <script.json>")
@@ -231,19 +315,10 @@ async def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     mp3 = out_dir / f"{doc['id']}.mp3"
 
-    # The service intermittently answers with no audio at all (NoAudioReceived)
-    # for a request that succeeds unchanged a moment later -- measured on a
-    # one-sentence probe -- so retry rather than fail a twelve-minute script.
-    for attempt in range(1, 4):
-        try:
-            words = await speak(" ".join(lines), doc["voice"], mp3,
-                                rate=doc.get("rate", "+0%"), pitch=doc.get("pitch", "+0Hz"))
-            break
-        except edge_tts.exceptions.NoAudioReceived:
-            if attempt == 3:
-                raise
-            print(f"no audio from the service (attempt {attempt}); retrying")
-            await asyncio.sleep(10 * attempt)
+    words = await speak_script(
+        lines, doc["voice"], mp3,
+        rate=doc.get("rate", "+0%"), pitch=doc.get("pitch", "+0Hz"),
+    )
     if doc.get("max_pause") or doc.get("pitch_ratio"):
         # A max_pause longer than any real pause makes this a pitch pass only.
         removed = compress_pauses(mp3, words, float(doc.get("max_pause") or 99),

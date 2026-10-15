@@ -101,7 +101,8 @@ def work_dir(script_path: str) -> Path:
 
 def shots(doc: dict) -> list[str]:
     """The scene description of every line that starts a new picture."""
-    return [line["image"] for line in doc["lines"] if line.get("image")]
+    # A line with ``file`` is a supplied still. It is not a prompt.
+    return [line["image"] for line in doc["lines"] if line.get("image") and not line.get("file")]
 
 
 def main() -> int:
