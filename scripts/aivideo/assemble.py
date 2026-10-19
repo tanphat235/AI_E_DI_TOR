@@ -59,9 +59,12 @@ def shot_starts(doc: dict) -> list[int]:
     neither are spoken over the same picture. A script with an image on every
     line (the older format) is simply one shot per line.
     """
-    starts = [i for i, line in enumerate(doc["lines"]) if line.get("image") or line.get("map")]
+    starts = [
+        i for i, line in enumerate(doc["lines"])
+        if line.get("image") or line.get("map") or line.get("file")
+    ]
     if not starts or starts[0] != 0:
-        raise SystemExit("the first line must carry an image or a map")
+        raise SystemExit("the first line must carry an image, a file, or a map")
     return starts
 
 
@@ -73,6 +76,13 @@ def region(doc: dict, name: str) -> dict:
 
 
 def shot_picture(doc: dict, work: Path, line: dict) -> Path:
+    # A supplied still (a photo or a redacted screenshot) is used as-is.
+    # ``image`` remains a generation prompt.
+    if line.get("file"):
+        p = (work / line["file"]).resolve()
+        if not p.is_file():
+            raise SystemExit(f"missing still {p}")
+        return p
     if line.get("map"):
         out = work / ".aive" / "map" / f"full_{line['map']}.png"
         return locator.render_full(work / doc["map"]["image"], region(doc, line["map"]), out,
@@ -148,8 +158,12 @@ def main() -> int:
         push = 0.0 if shot.get("map") else ZOOM - 1
         # The still is scaled up first and cropped back; zooming a 1920-wide
         # source directly makes fine lines shimmer.
+        big_w, big_h = FRAME_W * 2, FRAME_H * 2
+        # Fit, then pad. A raw scale to 16:9 stretches phone screenshots
+        # and portrait paintings. The bars are a warm dark gold.
         chains.append(
-            f"[{i}:v]scale={FRAME_W * 2}:{FRAME_H * 2},"
+            f"[{i}:v]scale={big_w}:{big_h}:force_original_aspect_ratio=decrease,"
+            f"pad={big_w}:{big_h}:(ow-iw)/2:(oh-ih)/2:color=0x1A140C,"
             f"zoompan=z='1+{push:.4f}*on/{frames}':d=1"
             f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             f":s={FRAME_W}x{FRAME_H}:fps={FPS},setsar=1[s{i}]"
