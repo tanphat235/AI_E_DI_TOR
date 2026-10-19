@@ -409,7 +409,7 @@ def caption_cues(
     """
     cues: list[Cue] = []
     offset = 0.0
-    for part in parts:
+    for idx, part in enumerate(parts):
         p0, p1 = float(part["start"]), float(part["end"])
         for seg in transcript:
             s, e = float(seg["start"]), float(seg["end"])
@@ -433,8 +433,10 @@ def caption_cues(
                 cues.append(Cue(start=t, end=t + span, lines=tuple(page)))
                 t += span
         # A cross-fade eats ``overlap`` seconds at each junction, so every part
-        # after the first begins that much earlier than its spans imply.
-        offset += (p1 - p0) - overlap
+        # after the first begins that much earlier than its spans imply. A
+        # ``cut_in`` junction is a hard cut and eats nothing.
+        nxt = parts[idx + 1] if idx + 1 < len(parts) else None
+        offset += (p1 - p0) - (0.0 if nxt is not None and nxt.get("cut_in") else overlap)
 
     cues.sort(key=lambda c: c.start)
     # Transcript lines abut, and a cue that ends exactly where the next begins
@@ -556,12 +558,28 @@ def overlap_for(transition: str, transition_sec: float) -> float:
     return 0.0 if transition == "cut" else max(0.0, transition_sec)
 
 
+def total_overlap(parts: list[dict], transition: str, transition_sec: float) -> float:
+    """Seconds all junctions together remove from the timeline.
+
+    A part marked ``cut_in`` joins its predecessor with a hard cut whatever the
+    clip's transition, so it removes nothing.
+    """
+    per = overlap_for(transition, transition_sec)
+    return per * sum(1 for p in parts[1:] if not p.get("cut_in"))
+
+
 def _transition_chain(parts: list[dict], transition: str, secs: float) -> list[str]:
     """Cross-fade the parts together, picture and sound, one junction at a time.
 
     A dissolve here is not decoration: these spans are cut from different
     places in one talk, and a hard cut between them reads as a glitch where a
     dissolve reads as "later, on the same subject".
+
+    The exception is a part marked ``cut_in``: two parts contiguous in the
+    source, split only because the camera cuts there and each side needs its
+    own framing. A cross-fade would overlap half a second of continuous speech
+    with itself, so that junction is a plain concat, which keeps the audio
+    sample-continuous.
     """
     kind = "fade" if transition == "dissolve" else transition
     chains: list[str] = []
@@ -572,15 +590,21 @@ def _transition_chain(parts: list[dict], transition: str, secs: float) -> list[s
     acc = float(parts[0]["end"] - parts[0]["start"])
     for i in range(1, len(parts)):
         d = float(parts[i]["end"] - parts[i]["start"])
-        offset = max(0.0, acc - secs)
         v_out, a_out = f"vx{i}", f"ax{i}"
-        chains.append(
-            f"[{v_prev}][p{i}]xfade=transition={kind}:duration={secs:.3f}"
-            f":offset={offset:.3f}[{v_out}]"
-        )
-        chains.append(f"[{a_prev}][a{i}]acrossfade=d={secs:.3f}:c1=tri:c2=tri[{a_out}]")
+        if parts[i].get("cut_in"):
+            # fps after concat: the next xfade needs a constant frame rate.
+            chains.append(f"[{v_prev}][p{i}]concat=n=2:v=1:a=0,fps=30[{v_out}]")
+            chains.append(f"[{a_prev}][a{i}]concat=n=2:v=0:a=1[{a_out}]")
+            acc = acc + d
+        else:
+            offset = max(0.0, acc - secs)
+            chains.append(
+                f"[{v_prev}][p{i}]xfade=transition={kind}:duration={secs:.3f}"
+                f":offset={offset:.3f}[{v_out}]"
+            )
+            chains.append(f"[{a_prev}][a{i}]acrossfade=d={secs:.3f}:c1=tri:c2=tri[{a_out}]")
+            acc = acc + d - secs
         v_prev, a_prev = v_out, a_out
-        acc = acc + d - secs
     chains.append(f"[{v_prev}]null[talk]")
     chains.append(f"[{a_prev}]anull[speech]")
     return chains
@@ -621,7 +645,6 @@ def video_graph(
     talk_flip = "hflip," if flip == "top" else ""
     # Zoom before the flip: the face was measured on the unflipped band, so the
     # crop offset is in unflipped coordinates.
-    zoom_step = f"{zoom}," if zoom else ""
     chains: list[str] = []
 
     for i in range(len(parts)):
@@ -634,6 +657,11 @@ def video_graph(
         # graph already branches.
         part_crop = str(parts[i].get("crop") or src_crop)
         pre = erase + (f"crop={part_crop}," if part_crop else "")
+        # Likewise a part may carry its own zoom, measured on its own crop
+        # (build_shorts sets "zoom_filter" when the parts' framings differ);
+        # "" there means this part is not zoomed at all.
+        part_zoom = parts[i].get("zoom_filter", zoom)
+        zoom_step = f"{part_zoom}," if part_zoom else ""
         # setpts resets each part's clock to zero: xfade reads its offset on
         # the first input's own timeline, and a part cut with -ss carries the
         # source's timestamps unless they are reset.

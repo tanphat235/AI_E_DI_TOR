@@ -68,14 +68,35 @@ def transcribe(
 ) -> int:
     from faster_whisper import WhisperModel
 
+    # A run that was killed leaves a transcript marked partial. Treating that as
+    # a finished cache silently handed segment_qa a third of a talk; restarting
+    # from zero threw away an hour of decoding. Resume after its last segment.
+    kept: list[dict] = []
+    offset = 0.0
     if out.exists() and out.stat().st_size > 1000 and not force:
-        log(f"CACHE_EXISTS {out}", log_file)
-        return 0
+        prev = json.loads(out.read_text(encoding="utf-8"))
+        if not prev.get("partial"):
+            log(f"CACHE_EXISTS {out}", log_file)
+            return 0
+        kept = list(prev.get("segments") or [])
+        offset = float(kept[-1]["end"]) if kept else 0.0
     if not wav.is_file():
         log(f"missing wav {wav}", log_file)
         return 1
 
-    log_file.write_text("", encoding="utf-8")
+    if kept:
+        log(f"RESUME from {offset:.1f}s ({len(kept)} segments kept)", log_file)
+        rest = wav.with_name("audio_resume.wav")
+        proc = subprocess.run(
+            [str(_ffmpeg()), "-y", "-ss", f"{offset:.3f}", "-i", str(wav), "-c", "copy", str(rest)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if proc.returncode != 0:
+            log(f"resume slice failed: {(proc.stderr or '')[-300:]}", log_file)
+            return 1
+        wav = rest
+    else:
+        log_file.write_text("", encoding="utf-8")
     log(f"Loading model {model_name} (cpu {compute_type})...", log_file)
     model = WhisperModel(model_name, device="cpu", compute_type=compute_type)
     log(f"Transcribing (beam {beam})...", log_file)
@@ -107,18 +128,18 @@ def transcribe(
         initial_prompt=initial_prompt,
         condition_on_previous_text=True,
     )
-    rows: list[dict] = []
-    for i, seg in enumerate(segments):
+    rows: list[dict] = list(kept)
+    for i, seg in enumerate(segments, start=len(kept)):
         rows.append(
             {
                 "i": i,
-                "start": round(seg.start, 3),
-                "end": round(seg.end, 3),
+                "start": round(seg.start + offset, 3),
+                "end": round(seg.end + offset, 3),
                 "text": seg.text.strip(),
             }
         )
         if i % 20 == 0:
-            log(f"seg {i} t={seg.start:.1f}s text={seg.text.strip()[:60]}", log_file)
+            log(f"seg {i} t={seg.start + offset:.1f}s text={seg.text.strip()[:60]}", log_file)
             out.write_text(
                 json.dumps(
                     {
@@ -135,11 +156,13 @@ def transcribe(
 
     doc = {
         "language": info.language,
-        "duration": info.duration,
+        "duration": info.duration + offset,
         "segments": rows,
         "partial": False,
     }
     out.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    if kept:
+        wav.unlink(missing_ok=True)
     log(f"DONE segs={len(rows)} elapsed={round(time.time() - t0, 1)}s -> {out}", log_file)
     return 0
 

@@ -446,8 +446,9 @@ def render_clip(
     # Every junction removes the cross-fade from the timeline, so the finished
     # clip is shorter than the sum of its spans. The B-roll length, the music
     # fade and the caption times all read this, not the raw sum.
-    overlap = lc.overlap_for(transition, transition_sec) if len(parts) > 1 else 0.0
-    dur = sum(p["end"] - p["start"] for p in parts) - overlap * (len(parts) - 1)
+    dur = sum(p["end"] - p["start"] for p in parts) - lc.total_overlap(
+        parts, transition, transition_sec
+    )
     # The talk is stretched, so the finished clip runs longer than its spans.
     out_dur = dur / speed if speed else dur
     pre = f"crop={src_crop}," if src_crop else ""
@@ -1123,18 +1124,67 @@ def run(settings: Settings) -> int:
                 lo, hi = float(part["start"]), float(part["end"])
                 n = max(6, min(24, int((hi - lo) / 8)))
                 times += [lo + (hi - lo) * (k + 0.5) / n for k in range(n)]
-            if settings.talk_zoom == "auto":
-                # One zoom is applied to every part. When the parts name one
-                # shared crop, measure the face inside that box; the project
-                # crop is the close-up and would frame a wide shot wrong.
-                span_crops = [
-                    str(part.get("crop") or settings.src_crop) for part in spans
-                ]
-                measure_crop = (
-                    span_crops[0]
-                    if len(set(span_crops)) == 1
-                    else settings.src_crop
+            def _framing(part: dict) -> tuple[str, str]:
+                return (
+                    str(part.get("crop") or settings.src_crop),
+                    str(part.get("zoom") or "auto"),
                 )
+
+            groups: dict[tuple[str, str], list[dict]] = {}
+            for part in spans:
+                groups.setdefault(_framing(part), []).append(part)
+            if settings.talk_zoom == "auto" and len(groups) > 1:
+                # Parts with different framings get a zoom each, measured on
+                # their own crop and their own frames. One shared measurement
+                # (the old behaviour) was taken on the job's default crop and
+                # then applied on top of every part's own crop: a close-up crop
+                # got zoomed twice, and a wide congregation shot got zoomed onto
+                # whichever audience face Haar found. A part may say
+                # "zoom": "none" to be left exactly as framed by its crop.
+                for (crop, mode), members in groups.items():
+                    label = crop or "full frame"
+                    if mode == "none":
+                        for part in members:
+                            part["zoom_filter"] = ""
+                        print(f"  [{label}] {len(members)} part(s): zoom off")
+                        continue
+                    g_times = []
+                    for part in members:
+                        lo, hi = float(part["start"]), float(part["end"])
+                        n = max(6, min(24, int((hi - lo) / 8)))
+                        g_times += [lo + (hi - lo) * (k + 0.5) / n for k in range(n)]
+                    fr = lc.measure_face(
+                        ffmpeg,
+                        settings.source,
+                        src_crop=crop,
+                        talk_h=talk_h,
+                        times=g_times[:40],
+                        frame_w=settings.out_w,
+                        target_frac=settings.talk_face_frac,
+                        zoom_max=settings.talk_zoom_max,
+                    )
+                    group_filter = ""
+                    if fr is None:
+                        print(f"  [{label}] {len(members)} part(s): no face found, left alone")
+                    else:
+                        group_filter = lc.zoom_filter(
+                            zoom=fr.zoom, face_x=fr.face_x, face_y=fr.face_y,
+                            talk_h=talk_h, place_y=settings.talk_face_y,
+                            frame_w=settings.out_w,
+                        )
+                        print(
+                            f"  [{label}] {len(members)} part(s): face "
+                            f"{fr.frames_found}/{fr.frames_tried} frames: "
+                            f"x{fr.face_x:.2f} y{fr.face_y:.2f} h{fr.face_frac:.2f}"
+                            f" -> zoom {fr.zoom:.2f}"
+                        )
+                    for part in members:
+                        part["zoom_filter"] = group_filter
+            elif settings.talk_zoom == "auto" and next(iter(groups))[1] == "none":
+                print("  zoom off for every part")
+            elif settings.talk_zoom == "auto":
+                # One framing shared by every part: measure inside that crop.
+                measure_crop = next(iter(groups))[0]
                 fr = lc.measure_face(
                     ffmpeg,
                     settings.source,
