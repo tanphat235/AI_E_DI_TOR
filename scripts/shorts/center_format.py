@@ -47,6 +47,8 @@ apply exactly.
 
 from __future__ import annotations
 
+import loudness
+
 TAG = "@loiphatdayquathayphaphoa"
 TRANSITION_SEC = 0.5
 # Reference only -- see the module docstring. The real value is derived per
@@ -59,6 +61,10 @@ TALK_FACE_FRAC = 0.45
 TALK_FACE_Y = 0.5
 VOICE_PITCH = 0.94
 PEAK_DBFS = -1.0
+# Every short is brought to this integrated loudness, up or down (loudness.py).
+# Fixed on the established close-up shorts, -15.3 LUFS; a clip from a distant
+# camera used to land 1.5-2 dB lower because the old check only lowered.
+LOUDNESS_TARGET = loudness.TARGET_LUFS
 SPEED = 1.1  # as of 2026-10-08; the default pace for every center-format short
 MUSIC_DIP_DB = -5.0
 MUSIC_FADE_SEC = 1.0
@@ -81,6 +87,7 @@ def common_args(
     talk_face_y: float = TALK_FACE_Y,
     voice_pitch: float = VOICE_PITCH,
     peak_dbfs: float = PEAK_DBFS,
+    loudness_target: float = LOUDNESS_TARGET,
     broll_seed: int = 11,
     broll_chunk: int = BROLL_CHUNK,
     broll_spread: str = BROLL_SPREAD,
@@ -111,6 +118,7 @@ def common_args(
         "--voice-clarity",
         "--voice-pitch", str(voice_pitch),
         "--peak-dbfs", str(peak_dbfs),
+        "--loudness-target", str(loudness_target),
         "--speed", str(speed),
         "--part-transition", "dissolve",
         "--part-transition-sec", str(transition_sec),

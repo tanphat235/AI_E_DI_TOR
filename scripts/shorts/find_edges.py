@@ -138,8 +138,17 @@ def snap_edge(
     # (a, b, prev word, next word); a real silence first, then word boundaries.
     cands: list[tuple[float, float, Word | None, Word | None]] = []
     for a, b in energy_pauses(db, t0):
-        prev = next((w for w in reversed(words) if w.end <= a + 0.15), None)
-        nxt = next((w for w in words if w.start >= b - 0.15), None)
+        # A word that is still sounding at the dip (a soft word-final syllable
+        # drops under the threshold before the word ends) is not in the pause:
+        # push the pause's edges out to that word's own end / start.
+        prev = next((w for w in reversed(words) if w.start <= a), None)
+        nxt = next((w for w in words if w.end >= b), None)
+        if prev is not None:
+            a = max(a, prev.end)
+        if nxt is not None:
+            b = min(b, nxt.start)
+        if b <= a:
+            continue
         cands.append((a, b, prev, nxt))
     for prev, nxt in zip([None, *words], [*words, None]):
         if prev is not None and nxt is not None:

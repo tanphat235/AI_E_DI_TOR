@@ -32,6 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import layout_center as lc
+import loudness
 
 
 def _ffmpeg() -> Path:
@@ -154,17 +155,12 @@ class Settings:
     caption_max_lines: int = 2
     # Channel handle drawn in the caption's place when captions are off.
     channel_tag: str = ""
-    # The centre layout's standing default: pull a finished clip DOWN to this
-    # many LUFS if it measures louder, never up if it is already quieter. Set
-    # just above the LOUDEST of the nine established centre-layout shorts
-    # (-15.38 to -16.29 LUFS), not their median -- a ceiling has to sit at the
-    # loud edge of what has already shipped, or it would quietly re-cap most of
-    # that same cluster the first time this check ran. -15.4 looked safe
-    # rounded to one decimal and was not: the loudest of the nine measures
-    # -15.38 unrounded, louder than -15.4, which is why -15.3 and not -15.4.
-    # Caught by testing against all nine before trusting the number.
+    # The centre layout's standing default: bring every finished clip to this
+    # many integrated LUFS, UP as well as down (see loudness.py). It used to be
+    # a ceiling that only pulled loud clips down, which left clips cut from a
+    # distant camera 1.5-2 dB under the close-up ones from the same talk.
     # 0.0 disables the check entirely.
-    loudness_ceiling: float = -15.3
+    loudness_target: float = loudness.TARGET_LUFS
     # Re-render clips that already exist. Skipping them is right while
     # adding segments to a project and wrong after a format change, which
     # leaves the old files looking freshly made.
@@ -435,7 +431,7 @@ def render_clip(
     duck_threshold: float = 0.01,
     duck_ratio: float = 12.0,
     duck_release: float = 300.0,
-    loudness_ceiling: float | None = None,
+    loudness_target: float | None = None,
 ) -> Path:
     shorts_dir.mkdir(parents=True, exist_ok=True)
     out = shorts_dir / f"{seg['id']}.mp4"
@@ -637,56 +633,12 @@ def render_clip(
     proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr[-800:] if proc.stderr else "ffmpeg failed")
-    if loudness_ceiling is not None:
-        _cap_loudness(ffmpeg, out, loudness_ceiling)
+    if loudness_target is not None:
+        loudness.match_loudness(
+            ffmpeg, out, target=loudness_target,
+            ceiling_dbfs=peak_dbfs if peak_dbfs else loudness.PEAK_CEILING_DBFS,
+        )
     return out
-
-
-def _measure_integrated_lufs(ffmpeg: Path, path: Path) -> float | None:
-    """Integrated loudness of a file's own audio track, in LUFS.
-
-    One ffmpeg pass -- loudnorm's own measuring pass, which is read-only and
-    writes nothing -- not loudnorm's two-pass normalise, which would rewrite
-    the file to a *fixed* target and raise a quiet clip as readily as it lowers
-    a loud one. Only a ceiling is wanted here.
-    """
-    proc = subprocess.run(
-        [str(ffmpeg), "-i", str(path), "-af", "loudnorm=print_format=json", "-f", "null", "-"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-    )
-    match = re.search(r'"input_i"\s*:\s*"(-?[\d.]+)"', proc.stderr or "")
-    return float(match.group(1)) if match else None
-
-
-def _cap_loudness(ffmpeg: Path, path: Path, ceiling_lufs: float) -> None:
-    """Pull a finished clip DOWN to ceiling_lufs if it measures louder; never
-    raises a quiet one.
-
-    The target is the house style measured across the established centre-layout
-    shorts -- nine of them clustered at -15.4 to -16.3 LUFS -- not any single
-    clip's own level, so a hotter source (a documentary narration mixed louder
-    than this channel's own talks, say) cannot make one short stand out against
-    the rest the way dao_phat_lam_roi_tin did. Re-encodes the audio only; the
-    video stream is copied, untouched.
-    """
-    measured = _measure_integrated_lufs(ffmpeg, path)
-    if measured is None or measured <= ceiling_lufs:
-        return
-    delta = ceiling_lufs - measured  # negative: how far down to pull it
-    tmp = path.with_name(path.stem + ".loudcap" + path.suffix)
-    cmd = [
-        str(ffmpeg), "-y", "-i", str(path),
-        "-af", f"volume={delta:.2f}dB",
-        "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart", str(tmp),
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if proc.returncode == 0 and tmp.is_file():
-        tmp.replace(path)
-        print(f"  loudness {measured:.1f} LUFS -> capped to {ceiling_lufs:.1f} ({delta:+.1f} dB)")
-    else:
-        tmp.unlink(missing_ok=True)
-        print(f"  WARNING loudness cap failed; keeping {measured:.1f} LUFS as rendered")
 
 
 def _drawtext_path(path: Path) -> str:
@@ -1273,9 +1225,9 @@ def run(settings: Settings) -> int:
                     # matching every other setting introduced since that layout
                     # shipped. 0.0 is the opt-out, since no real clip is ever
                     # at or above 0 LUFS.
-                    loudness_ceiling=(
-                        settings.loudness_ceiling
-                        if settings.layout == "center" and settings.loudness_ceiling < 0.0
+                    loudness_target=(
+                        settings.loudness_target
+                        if settings.layout == "center" and settings.loudness_target < 0.0
                         else None
                     ),
                 )
@@ -1481,11 +1433,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Handle drawn where the caption would be, e.g. @mychannel. Centre layout with --no-captions.",
     )
     parser.add_argument(
-        "--loudness-ceiling",
+        "--loudness-target",
         type=float,
-        default=-15.3,
-        help="Centre layout default: pull a clip down to this many LUFS if it "
-             "measures louder; never raises a quieter one. 0 disables the check.",
+        default=loudness.TARGET_LUFS,
+        help="Centre layout default: bring every clip to this many integrated LUFS, "
+             "raising a quieter one and lowering a louder one. 0 disables the check.",
     )
     parser.add_argument("--caption-size", type=int, default=54)
     parser.add_argument("--caption-max-lines", type=int, default=2)
@@ -1674,7 +1626,7 @@ def main(argv: list[str] | None = None) -> int:
         overwrite=args.overwrite,
         thumb_only=args.thumb_only,
         channel_tag=args.channel_tag,
-        loudness_ceiling=args.loudness_ceiling,
+        loudness_target=args.loudness_target,
         caption_size=args.caption_size,
         caption_max_lines=args.caption_max_lines,
         voice_clarity=args.voice_clarity,

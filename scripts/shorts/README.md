@@ -285,6 +285,20 @@ Going much below 0.90 is a separate problem rather than a matter of taste:
 `asetrate` shifts the formants along with the pitch, so past roughly ten
 percent the voice stops sounding deeper and starts sounding slowed.
 
+`--loudness-target -15.3` (centre layout default, `loudness.py`) brings every
+finished short to one integrated loudness, **up as well as down**. It used to be
+a ceiling that only lowered, so shorts cut from a distant camera (the wide hall
+shot in clips 12-13 of `kim-cang-thua`) came out at -16.7 to -17.4 LUFS against
+-15.3 for the close-up ones -- 1.5-2 dB quieter. Gain only (one `volume` step,
+so the voice-to-music balance is unchanged), the same `--peak-dbfs` limiter
+after it, video stream copied untouched, audio re-encoded once at AAC 128k from
+the original. A clip within 0.15 LU of the target is not rewritten. To fix
+shorts that already exist, without touching the originals:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\shorts\loudness.py clip.mp4 --out-dir fixed\
+```
+
 `--peak-dbfs -1` puts a ceiling on the finished mix. It is not loudness
 control: on a hot source the clarity chain's makeup plus the bed reached
 **-0.00 dBFS** with two samples at full scale, leaving no headroom at all.
