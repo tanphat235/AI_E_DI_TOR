@@ -159,7 +159,11 @@ def snap_edge(
         dist = abs(min(max(t, lo), hi) - t)
         if dist > max_move:
             continue
-        score = min(length, 0.4) - 1.0 * dist
+        # A boundary with no silence in it is where Whisper THINKS two words
+        # meet, and Whisper sometimes drops a word or shifts it (it lost "não"
+        # from "phiền não" and the cut landed inside it). Prefer a real
+        # pause nearby; keep a tight boundary as the fallback.
+        score = min(length, 0.4) - 1.0 * dist - (0.4 if length < 0.2 else 0.0)
         if best is None or score > best[0]:
             best = (score, a, b, prev, nxt, length)
     if best is None:
@@ -174,12 +178,38 @@ def snap_edge(
         i1 = min(len(db) - 1, int(round((mid + 0.08 - t0) / FRAME)))
         k = i0 + int(np.argmin(db[i0 : i1 + 1]))
         cut = t0 + (k + 0.5) * FRAME
+    # Last line of defence. Whisper's word times can be wrong or missing, which
+    # put a start inside the tail of the previous sentence ("...giới vậy | Cho
+    # nên": the cut fell in "vậy" and left a stray fragment). The audio is the
+    # judge: a cut must sit in a quiet frame. If it does not, move it into the
+    # nearest real silence within reach.
+    quiet_thr = float(np.percentile(db, 95)) - 15.0
+
+    def _loud(x: float) -> bool:
+        i0 = max(0, int(round((x - 0.04 - t0) / FRAME)))
+        i1 = min(len(db) - 1, int(round((x + 0.04 - t0) / FRAME)))
+        return bool(db[i0 : i1 + 1].mean() > quiet_thr)
+
+    fixed_note = None
+    if _loud(cut):
+        near = [
+            (a, b) for a, b in energy_pauses(db, t0)
+            if min(abs(a - t), abs(b - t)) <= max_move + 0.5 or a <= t <= b
+        ]
+        if near:
+            a, b = min(near, key=lambda ab: 0.0 if ab[0] <= t <= ab[1] else min(abs(ab[0] - t), abs(ab[1] - t)))
+            room = min(pre if kind == "start" else post, (b - a) / 2)
+            new = (b - room) if kind == "start" else (a + room)
+            fixed_note = f"cut {cut:.2f} was inside speech; moved into the silence {a:.2f}-{b:.2f}"
+            cut = new
     info = {
         "pause": round(length, 2),
         "moved": round(cut - t, 2),
         "before": prev.text if prev else None,
         "after": nxt.text if nxt else None,
     }
+    if fixed_note:
+        info["note"] = fixed_note
     return cut, info
 
 

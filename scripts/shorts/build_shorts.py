@@ -873,6 +873,13 @@ def run(settings: Settings) -> int:
         segments_path.write_text(json.dumps(segs, ensure_ascii=False, indent=2), encoding="utf-8")
     if settings.limit:
         segs = segs[: settings.limit]
+    if settings.layout == "center" and settings.part_transition != "cut":
+        # Fixed in the format: every junction between parts is a transition,
+        # and the fade never eats speech (see lc.pad_junctions).
+        for seg in segs:
+            if len(seg.get("parts") or []) > 1:
+                seg["parts"] = lc.pad_junctions(seg["parts"], settings.part_transition_sec)
+                seg["duration"] = sum(q["end"] - q["start"] for q in seg["parts"])
     print(f"segments={len(segs)}")
     for s in segs[:8]:
         print(f"  {s['id']} {s['start']:.1f}-{s['end']:.1f} ({s['duration']:.1f}s) {s['title']}")

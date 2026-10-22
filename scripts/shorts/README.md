@@ -313,6 +313,16 @@ the balance on a render **without** `--peak-dbfs`, then add it.
 
 ### Joining spans with a transition
 
+**Fixed rule (2026-10-21): every junction between spans is a transition, never a
+hard cut, and the fade never eats a word.** build_shorts pads each side of a
+junction by the transition length (0.5 s) with real picture and mutes the audio
+in that added stretch (`layout_center.pad_junctions`; the part keeps
+`speech_start` / `speech_end`). The cross-fade therefore runs over silence on
+both sides, whether or not the speaker paused there. A hard cut was previously
+chosen where there was no 1 s pause, and it left cut-off-looking sentences. The
+only remaining hard cut is `cut_in`, which is not a junction: two spans that are
+contiguous in the source, split just to change the crop.
+
 **This is part of the centre format.** When the user says "format center",
 every junction of a multi-part clip gets a 0.5 s dissolve, as in
 `projects/van-dap-tinh-yeu/cut1.py`. That was settled on 2026-09-22 and

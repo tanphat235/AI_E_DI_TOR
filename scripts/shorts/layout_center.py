@@ -568,6 +568,44 @@ def total_overlap(parts: list[dict], transition: str, transition_sec: float) -> 
     return per * sum(1 for p in parts[1:] if not p.get("cut_in"))
 
 
+def pad_junctions(parts: list[dict], secs: float) -> list[dict]:
+    """Make every junction a transition without it eating a single word.
+
+    A cross-fade consumes ``secs`` from the end of one part and the start of the
+    next. Where the speech runs right up to a cut (no pause to hide the fade
+    in) the fade would swallow the last or first word. So each side of a
+    junction is lengthened by ``secs`` with real picture, and the added stretch
+    is muted: the part keeps its ``speech_start`` / ``speech_end`` (the edges
+    that were asked for) and the audio outside them is silenced. The fade then
+    runs over silence on both sides and the speech is untouched.
+
+    A part marked ``cut_in`` is skipped -- that is a contiguous split of one
+    stretch of speech, not a junction. Parts that already carry ``speech_*``
+    keys are left alone, so running this twice changes nothing.
+    """
+    out = [dict(p) for p in parts]
+    for i in range(1, len(out)):
+        a, b = out[i - 1], out[i]
+        if b.get("cut_in"):
+            continue
+        if "speech_end" not in a:
+            a["speech_end"] = a["end"]
+            a["end"] = a["end"] + secs
+        if "speech_start" not in b:
+            b["speech_start"] = b["start"]
+            b["start"] = max(0.0, b["start"] - secs)
+    return out
+
+
+def _mute_outside_speech(part: dict) -> str:
+    """Filter that silences the audio before speech_start and after speech_end."""
+    if "speech_start" not in part and "speech_end" not in part:
+        return ""
+    lo = float(part.get("speech_start", part["start"])) - float(part["start"])
+    hi = float(part.get("speech_end", part["end"])) - float(part["start"])
+    return f",volume=0:enable='not(between(t,{lo:.3f},{hi:.3f}))'"
+
+
 def _transition_chain(parts: list[dict], transition: str, secs: float) -> list[str]:
     """Cross-fade the parts together, picture and sound, one junction at a time.
 
@@ -584,7 +622,7 @@ def _transition_chain(parts: list[dict], transition: str, secs: float) -> list[s
     kind = "fade" if transition == "dissolve" else transition
     chains: list[str] = []
     for i in range(len(parts)):
-        chains.append(f"[{i}:a]asetpts=PTS-STARTPTS[a{i}]")
+        chains.append(f"[{i}:a]asetpts=PTS-STARTPTS{_mute_outside_speech(parts[i])}[a{i}]")
     v_prev, a_prev = "p0", "a0"
     # Length of the chain built so far, which is where the next junction goes.
     acc = float(parts[0]["end"] - parts[0]["start"])
