@@ -68,7 +68,11 @@ LOUDNESS_TARGET = loudness.TARGET_LUFS
 SPEED = 1.1  # as of 2026-10-08; the default pace for every center-format short
 MUSIC_DIP_DB = -5.0
 MUSIC_FADE_SEC = 1.0
-MUSIC_UNDER_DB = 14.0
+# The bed sits this many dB under the measured speech (build_shorts solves the gain per
+# recording). 14 was the original; on 2026-11-04 the user found the bed "a bit loud"
+# on the recent shorts, so it is 18 now. Every short built through common_args() gets
+# this, so it is not repeated per project.
+MUSIC_UNDER_DB = 18.0
 BROLL_CHUNK = 12
 BROLL_SPREAD = "golden"
 
