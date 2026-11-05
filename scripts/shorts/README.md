@@ -250,7 +250,8 @@ change together would need splitting into more stages.
 
 ### Why each audio flag is there
 
-`--music-under-db 14` rather than `--music-db`. A raw gain is not portable
+`--music-under-db 18` (it was 14 until 2026-11-04, when the bed was judged a bit loud;
+the value lives in `center_format.MUSIC_UNDER_DB`) rather than `--music-db`. A raw gain is not portable
 between recordings: the same `-20` sat 16 dB under the voice on song-tot and
 20 dB under it on this source, because the two voices are at different levels.
 `--music-under-db` measures the treated speech and the shaped bed and solves

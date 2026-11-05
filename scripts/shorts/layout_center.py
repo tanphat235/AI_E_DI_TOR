@@ -665,6 +665,8 @@ def video_graph(
     transition: str = "cut",
     transition_sec: float = 0.5,
     tag: str = "",
+    talk_brightness: float = 0.0,
+    talk_gamma: float = 1.0,
 ) -> tuple[str, str]:
     """Filter graph for the centre layout, plus the label carrying the picture.
 
@@ -681,6 +683,15 @@ def video_graph(
         for b in (tuple(int(v) for v in box.split(":")) for box in src_delogo)
     )
     talk_flip = "hflip," if flip == "top" else ""
+    # Lift for dark recordings, applied to the talk picture only -- the scene
+    # bands and the text stay as they are. gamma lifts the midtones (the face)
+    # without pushing the highlights to white the way a plain brightness offset
+    # does; brightness adds a small flat lift under it.
+    eq_step = (
+        f"eq=brightness={talk_brightness:.3f}:gamma={talk_gamma:.3f},"
+        if (abs(talk_brightness) > 1e-6 or abs(talk_gamma - 1.0) > 1e-6)
+        else ""
+    )
     # Zoom before the flip: the face was measured on the unflipped band, so the
     # crop offset is in unflipped coordinates.
     chains: list[str] = []
@@ -710,7 +721,7 @@ def video_graph(
         # metadata that fps had just established. fps has to come last.
         chains.append(
             f"[{i}:v]{pre}scale={style.frame_w}:{geom.talk_h}:force_original_aspect_ratio=increase,"
-            f"crop={style.frame_w}:{geom.talk_h},{zoom_step}{talk_flip}setpts=PTS-STARTPTS,"
+            f"crop={style.frame_w}:{geom.talk_h},{zoom_step}{eq_step}{talk_flip}setpts=PTS-STARTPTS,"
             f"fps=30,setsar=1[p{i}]"
         )
     if len(parts) == 1:

@@ -201,6 +201,10 @@ class Settings:
     talk_zoom_max: float = 1.5
     talk_face_frac: float = 0.32
     talk_face_y: float = 0.36
+    # Lift for a dark recording, on the talk picture only (see lc.video_graph).
+    # 0 / 1.0 leave the picture exactly as shot.
+    talk_brightness: float = 0.0
+    talk_gamma: float = 1.0
     # Playback speed. 0.75 slows everything to three quarters; the picture is
     # stretched with setpts and the speech with a second atempo, while the bed
     # keeps its own tempo and is simply given the longer output to cover.
@@ -396,6 +400,8 @@ def build_bed(
 def render_clip(
     seg: dict,
     *,
+    talk_brightness: float = 0.0,
+    talk_gamma: float = 1.0,
     source: Path,
     broll: Path,
     shorts_dir: Path,
@@ -473,6 +479,8 @@ def render_clip(
             transition=transition,
             transition_sec=transition_sec,
             tag=channel_tag,
+            talk_brightness=talk_brightness,
+            talk_gamma=talk_gamma,
         )
     else:
         video_graph = video_label = ""
@@ -1202,6 +1210,8 @@ def run(settings: Settings) -> int:
                     layout=settings.layout,
                     scratch_dir=cache,
                     zoom_filter=zoom_filter,
+                    talk_brightness=settings.talk_brightness,
+                    talk_gamma=settings.talk_gamma,
                     channel_tag=settings.channel_tag,
                     speed=settings.speed,
                     transition=settings.part_transition,
@@ -1480,7 +1490,7 @@ def main(argv: list[str] | None = None) -> int:
         "--music-under-db",
         type=float,
         default=0.0,
-        help="Put the bed this many dB under the measured speech, e.g. 14. Overrides --music-db.",
+        help="Put the bed this many dB under the measured speech, e.g. 18 (the centre format default). Overrides --music-db.",
     )
     parser.add_argument(
         "--speed",
@@ -1510,6 +1520,18 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=0.36,
         help="Where the face centre sits vertically in the band, 0=top 1=bottom.",
+    )
+    parser.add_argument(
+        "--talk-brightness",
+        type=float,
+        default=0.0,
+        help="Flat brightness lift on the talk picture (eq brightness, about 0.02-0.08 for a dark recording).",
+    )
+    parser.add_argument(
+        "--talk-gamma",
+        type=float,
+        default=1.0,
+        help="Midtone lift on the talk picture (eq gamma; 1.0 = off, 1.1-1.25 for a dark recording).",
     )
     parser.add_argument(
         "--peak-dbfs",
@@ -1647,6 +1669,8 @@ def main(argv: list[str] | None = None) -> int:
         talk_zoom_max=args.talk_zoom_max,
         talk_face_frac=args.talk_face_frac,
         talk_face_y=args.talk_face_y,
+        talk_brightness=args.talk_brightness,
+        talk_gamma=args.talk_gamma,
         speed=args.speed,
         out_w=args.out_w,
         out_h=args.out_h,
