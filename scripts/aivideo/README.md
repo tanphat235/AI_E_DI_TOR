@@ -14,6 +14,38 @@ output beside that script's project, the same split `scripts/shorts` uses:
 .\.venv\Scripts\python.exe      scripts\aivideo\assemble.py        projects\<name>\scripts\<id>.json
 ```
 
+## Paced version with an old-film look
+
+For a script with a top-level `pauses` key (see `tu-an-v3.json`) use these two
+instead of `narrate.py` and `assemble.py`:
+
+```powershell
+.\.venv-tts\Scripts\python.exe  scripts\aivideo\narrate_vieneu.py projects\<name>\scripts\<id>.json
+.\.venv-sdxl\Scripts\python.exe scripts\aivideo\assemble_film.py  projects\<name>\scripts\<id>.json
+# quick look at the first two minutes, with plain frames for pictures not drawn yet:
+.\.venv-sdxl\Scripts\python.exe scripts\aivideo\assemble_film.py  projects\<name>\scripts\<id>.json --seconds 120 --allow-missing
+```
+
+Extra script fields: `pauses` (seconds of rest after a phrase / sentence / paragraph,
+before and after a chapter card), `card` on a line (`kicker`, `title`, `sub` -- the
+line's `text` is the narrator's lead-in), `pause` (override the rest after one line),
+`style_first` (put the style before the scene in the image prompt, so the look
+holds across shots), `characters` (named descriptions substituted for `{name}` in
+scene prompts), `card_bg` (prompt for the chapter-card backdrop), `sfx_under_db`
+(how far under the voice the picture-change sounds sit; default 6).
+
+Fields added for `tu-an-v4.json`: `section` on a line (`kicker`, `title`) -- no heading is
+spoken; the narrator rests (`pauses.section`), the picture dissolves slowly and the name
+fades in and out over the first picture of the part. `file` on a line is a supplied photo
+(path relative to the project), shown as a toned print with a cream border. `people_note`
+is appended to every scene prompt that shows people. `pauses.inner_max` caps any silence
+inside a line (default 0.30 s), which is what removes the stalls at commas and years.
+Narration is cached per line by its text, so editing or moving a line re-synthesises only it.
+
+`assemble_film.py` writes a clip per shot to `.aive/film/clips/` (cached; pass
+`--force` to redraw), then one final pass for the film look, captions and sound.
+Chapter cards use Palatino because Georgia lacks Vietnamese stacked diacritics.
+
 `projects/<name>/scripts/<id>.json` therefore writes to `projects/<name>/`:
 
 ```

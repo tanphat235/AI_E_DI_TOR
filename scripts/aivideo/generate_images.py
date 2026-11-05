@@ -29,6 +29,7 @@ import gc
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -73,8 +74,56 @@ DEFAULT_STYLE = (
 )
 
 
-def build_prompt(scene: str, style: str) -> str:
-    return f"{scene.strip().rstrip('.')}. {style.strip().rstrip('.')}."
+# Words that mean a scene has people in it; see ``expand_scene``.
+_PEOPLE = re.compile(
+    r"\{(?:founder|villagers)\}|\b(?:people|crowds?|villagers?|farmers?|famil(?:y|ies)|"
+    r"men|man|women|woman|mothers?|child(?:ren)?|sons?|neighbou?rs|elders?|monks?|"
+    r"figure|followers|guards?|intellectuals|listeners|travell?er|persons?|parents|"
+    r"grandfather|father|supporters|doctor|mandarins?|girls?|boys?|nurses?|patients?|"
+    r"bodhisattva|stick[- ]figures?|prince)\b",
+    re.I,
+)
+
+
+def build_prompt(scene: str, style: str, *, style_first: bool = False) -> str:
+    """Join a scene and the shared style.
+
+    ``style_first`` puts the style at the front. FLUX feeds CLIP only the first
+    77 tokens (its pooled embedding steers the global look) while T5 reads the
+    whole prompt, so a style appended after a long scene is invisible to CLIP
+    and the pictures drift apart. Off by default so existing scripts keep the
+    prompt hash -- and therefore the pictures -- they already have.
+    """
+    scene = scene.strip().rstrip(".")
+    style = style.strip().rstrip(".")
+    return f"{style}. {scene}." if style_first else f"{scene}. {style}."
+
+
+def expand_scene(doc: dict, scene: str) -> str:
+    """Replace ``{name}`` with the script's ``characters[name]`` description.
+
+    A recurring figure described the same way in every prompt is the only lever
+    this model gives for keeping a face and costume recognisable from one
+    picture to the next.
+    """
+    shows_people = bool(_PEOPLE.search(scene))
+    for name, text in (doc.get("characters") or {}).items():
+        scene = scene.replace("{" + name + "}", text)
+    # A look every person in the picture must share (here: no head coverings),
+    # said once for the whole script rather than repeated in every scene. Only
+    # scenes that show people get it, so empty landscapes keep their pictures.
+    note = (doc.get("people_note") or "").strip()
+    if note and shows_people:
+        scene = f"{scene.strip().rstrip('.')}. {note}"
+    return scene
+
+
+def doc_prompt(doc: dict, scene: str) -> str:
+    """The final prompt for ``scene``, exactly as generate and assemble hash it."""
+    return build_prompt(
+        expand_scene(doc, scene), doc.get("style") or DEFAULT_STYLE,
+        style_first=bool(doc.get("style_first")),
+    )
 
 
 def prompt_tag(prompt: str) -> str:
@@ -86,7 +135,7 @@ def prompt_tag(prompt: str) -> str:
 
 def image_path(doc: dict, work: Path, scene: str) -> Path:
     """Where the picture for ``scene`` is (or will be) written."""
-    tag = prompt_tag(build_prompt(scene, doc.get("style") or DEFAULT_STYLE))
+    tag = prompt_tag(doc_prompt(doc, scene))
     return work / ".aive" / "images" / doc["id"] / f"{tag}.png"
 
 
@@ -102,16 +151,19 @@ def work_dir(script_path: str) -> Path:
 def shots(doc: dict) -> list[str]:
     """The scene description of every line that starts a new picture."""
     # A line with ``file`` is a supplied still. It is not a prompt.
-    return [line["image"] for line in doc["lines"] if line.get("image") and not line.get("file")]
+    scenes = [line["image"] for line in doc["lines"] if line.get("image") and not line.get("file")]
+    # The backdrop shared by every chapter card is drawn once, like any shot.
+    if doc.get("card_bg") and any(line.get("card") for line in doc["lines"]):
+        scenes.append(doc["card_bg"])
+    return scenes
 
 
 def main() -> int:
     if len(sys.argv) < 2:
         print("usage: generate_images.py <script.json> [--limit N]")
         return 2
-    doc = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    doc = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8-sig"))
     limit = int(sys.argv[sys.argv.index("--limit") + 1]) if "--limit" in sys.argv else 0
-    style = doc.get("style") or DEFAULT_STYLE
 
     work = work_dir(sys.argv[1])
     out_dir = work / ".aive" / "images" / doc["id"]
@@ -122,7 +174,7 @@ def main() -> int:
     scenes = shots(doc)
     if limit:
         scenes = scenes[:limit]
-    prompts = [build_prompt(s, style) for s in scenes]
+    prompts = [doc_prompt(doc, s) for s in scenes]
     tags = [prompt_tag(p) for p in prompts]
     # Files from before the name was the hash alone were "<n>_<tag>.png"; take
     # them over rather than paying ~20 s each to draw the same picture again.
