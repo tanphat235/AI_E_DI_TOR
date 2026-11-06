@@ -644,7 +644,7 @@ def render_clip(
     if loudness_target is not None:
         loudness.match_loudness(
             ffmpeg, out, target=loudness_target,
-            ceiling_dbfs=peak_dbfs if peak_dbfs else loudness.PEAK_CEILING_DBFS,
+            ceiling_dbfs=loudness.PEAK_CEILING_DBFS,
         )
     return out
 
